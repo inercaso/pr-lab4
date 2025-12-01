@@ -1,0 +1,121 @@
+# docker-compose configuration for distributed key-value store
+# runs 1 leader and 5 followers with single-leader replication
+
+services:
+  leader:
+    build: .
+    container_name: kv-leader
+    env_file:
+      - .env
+    environment:
+      - ROLE=leader
+      - NODE_NAME=leader
+      - QUORUM=${QUORUM:-2}
+      - DELAY_MIN=${DELAY_MIN:-0}
+      - DELAY_MAX=${DELAY_MAX:-1000}
+      - FOLLOWERS=http://follower1:8000,http://follower2:8000,http://follower3:8000,http://follower4:8000,http://follower5:8000
+    ports:
+      - "8080:8000"
+    networks:
+      - kv-network
+    depends_on:
+      - follower1
+      - follower2
+      - follower3
+      - follower4
+      - follower5
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  follower1:
+    build: .
+    container_name: kv-follower1
+    environment:
+      - ROLE=follower
+      - NODE_NAME=follower1
+    ports:
+      - "8081:8000"
+    networks:
+      - kv-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  follower2:
+    build: .
+    container_name: kv-follower2
+    environment:
+      - ROLE=follower
+      - NODE_NAME=follower2
+    ports:
+      - "8082:8000"
+    networks:
+      - kv-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  follower3:
+    build: .
+    container_name: kv-follower3
+    environment:
+      - ROLE=follower
+      - NODE_NAME=follower3
+    ports:
+      - "8083:8000"
+    networks:
+      - kv-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  follower4:
+    build: .
+    container_name: kv-follower4
+    environment:
+      - ROLE=follower
+      - NODE_NAME=follower4
+    ports:
+      - "8084:8000"
+    networks:
+      - kv-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  follower5:
+    build: .
+    container_name: kv-follower5
+    environment:
+      - ROLE=follower
+      - NODE_NAME=follower5
+    ports:
+      - "8085:8000"
+    networks:
+      - kv-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+networks:
+  kv-network:
+    driver: bridge
