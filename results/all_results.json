@@ -1,0 +1,67 @@
+[
+  {
+    "quorum": 1,
+    "total_writes": 100,
+    "successful_writes": 100,
+    "failed_writes": 0,
+    "total_time_seconds": 5.0770066999975825,
+    "avg_latency_ms": 239.487811999752,
+    "min_latency_ms": 58.141400000749854,
+    "max_latency_ms": 656.3190000015311,
+    "median_latency_ms": 220.13149999838788,
+    "p90_latency_ms": 434.62293999982643,
+    "p95_latency_ms": 505.93419500128215
+  },
+  {
+    "quorum": 2,
+    "total_writes": 100,
+    "successful_writes": 100,
+    "failed_writes": 0,
+    "total_time_seconds": 7.050571699997818,
+    "avg_latency_ms": 406.48552099999506,
+    "min_latency_ms": 94.50339999966673,
+    "max_latency_ms": 847.6958999999624,
+    "median_latency_ms": 404.49639999860665,
+    "p90_latency_ms": 668.4541200000239,
+    "p95_latency_ms": 750.5920250012423
+  },
+  {
+    "quorum": 3,
+    "total_writes": 100,
+    "successful_writes": 100,
+    "failed_writes": 0,
+    "total_time_seconds": 8.538944599997194,
+    "avg_latency_ms": 555.1406279998992,
+    "min_latency_ms": 161.0368000001472,
+    "max_latency_ms": 962.0123999993666,
+    "median_latency_ms": 546.1732499989012,
+    "p90_latency_ms": 832.3198999980377,
+    "p95_latency_ms": 877.4445599998216
+  },
+  {
+    "quorum": 4,
+    "total_writes": 100,
+    "successful_writes": 100,
+    "failed_writes": 0,
+    "total_time_seconds": 10.125006199999916,
+    "avg_latency_ms": 739.6482739999556,
+    "min_latency_ms": 300.3853000009258,
+    "max_latency_ms": 1088.6222000008274,
+    "median_latency_ms": 762.6458499998989,
+    "p90_latency_ms": 961.2333900011436,
+    "p95_latency_ms": 1010.6178199990608
+  },
+  {
+    "quorum": 5,
+    "total_writes": 100,
+    "successful_writes": 100,
+    "failed_writes": 0,
+    "total_time_seconds": 10.725044899998466,
+    "avg_latency_ms": 896.9294670001182,
+    "min_latency_ms": 446.0737000008521,
+    "max_latency_ms": 1086.265199999616,
+    "median_latency_ms": 946.4108000011038,
+    "p90_latency_ms": 1055.5495699973108,
+    "p95_latency_ms": 1070.327465000446
+  }
+]

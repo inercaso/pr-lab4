@@ -1,0 +1,68 @@
+================================================================================
+PERFORMANCE ANALYSIS REPORT
+distributed key-value store with single-leader replication
+================================================================================
+
+CONFIGURATION:
+  total writes per quorum: 100
+  number of keys per quorum: 10
+  writes per key: 10
+  concurrent batch size: 10
+  network delay: [0ms, 1000ms]
+  number of followers: 5
+
+LATENCY RESULTS BY QUORUM:
+--------------------------------------------------------------------------------
+quorum  mean (ms)   median (ms)   p90 (ms)    p95 (ms)    success   
+--------------------------------------------------------------------------------
+1       239.49      220.13        434.62      505.93      100/100
+2       406.49      404.50        668.45      750.59      100/100
+3       555.14      546.17        832.32      877.44      100/100
+4       739.65      762.65        961.23      1010.62     100/100
+5       896.93      946.41        1055.55     1070.33     100/100
+--------------------------------------------------------------------------------
+
+PERCENTILE EXPLANATION:
+--------------------------------------------------------------------------------
+  - Mean: average of all latency measurements
+  - Median (p50): 50% of requests completed faster than this
+  - p90: 90% of requests completed faster than this
+  - p95: 95% of requests completed faster than this (tail latency)
+
+  p90 and p95 are important for understanding worst-case behavior.
+  high tail latencies indicate occasional slow responses.
+
+WHY LATENCY INCREASES WITH QUORUM:
+--------------------------------------------------------------------------------
+  with quorum-based replication, the leader waits for K followers
+  to acknowledge before responding. each follower has random delay.
+
+  - quorum=1: wait for FASTEST follower only (low latency)
+  - quorum=3: wait for 3rd fastest (median latency)
+  - quorum=5: wait for SLOWEST follower (high latency)
+
+  this is the consistency vs latency trade-off:
+  - higher quorum = more durable (data on more nodes)
+  - higher quorum = higher latency (wait for slower nodes)
+
+DATA CONSISTENCY:
+--------------------------------------------------------------------------------
+  some replicas have inconsistencies:
+    - follower1: missing=0, extra=0, mismatched=9
+    - follower2: missing=0, extra=0, mismatched=9
+    - follower3: missing=0, extra=0, mismatched=7
+    - follower4: missing=0, extra=0, mismatched=9
+    - follower5: missing=0, extra=0, mismatched=10
+
+  leader: 10 keys
+  follower1: 10 keys - inconsistent
+  follower2: 10 keys - inconsistent
+  follower3: 10 keys - inconsistent
+  follower4: 10 keys - inconsistent
+  follower5: 10 keys - inconsistent
+
+CONSISTENCY EXPLANATION:
+--------------------------------------------------------------------------------
+  semi-synchronous replication guarantees:
+  - data is on leader + quorum followers BEFORE write returns
+  - remaining followers receive data asynchronously (eventually)

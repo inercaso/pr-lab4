@@ -1,0 +1,49 @@
+======================================================================
+PERFORMANCE ANALYSIS REPORT
+distributed key-value store with single-leader replication
+======================================================================
+
+CONFIGURATION:
+  total writes per test: 100
+  number of keys: 10
+  writes per key: 10
+  concurrent batch size: 10
+  network delay: [0ms, 1000ms]
+
+LATENCY RESULTS BY QUORUM:
+------------------------------------------------------------
+quorum    avg (ms)       min (ms)       max (ms)       success   
+------------------------------------------------------------
+2         433.04         92.88          974.33         100/100
+------------------------------------------------------------
+
+ANALYSIS:
+
+  explanation:
+  - higher quorum = waiting for more follower acknowledgments
+  - with random delay [0ms, 1000ms], the nth-slowest follower
+    determines the response time (where n = quorum)
+  - quorum=1: wait for fastest follower only
+  - quorum=5: wait for slowest follower (max delay)
+
+DATA CONSISTENCY:
+------------------------------------------------------------
+  some replicas have inconsistencies:
+    - follower1: missing=0, extra=0, mismatched=8
+    - follower2: missing=0, extra=0, mismatched=8
+    - follower3: missing=0, extra=0, mismatched=9
+    - follower4: missing=0, extra=0, mismatched=10
+    - follower5: missing=0, extra=0, mismatched=8
+
+  leader: 12 keys
+  follower1: 12 keys - inconsistent
+  follower2: 12 keys - inconsistent
+  follower3: 12 keys - inconsistent
+  follower4: 12 keys - inconsistent
+  follower5: 12 keys - inconsistent
+
+EXPECTED BEHAVIOR:
+  - immediately after writes: some followers may lag (async replication)
+  - after short delay: all replicas should converge (eventual consistency)
+  - semi-synchronous guarantees data on leader + quorum followers
+  - remaining followers receive updates asynchronously
