@@ -53,6 +53,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 @dataclass
 class BenchmarkResult:
     """result of a single benchmark run."""
+
     quorum: int
     total_writes: int
     successful_writes: int
@@ -64,6 +65,18 @@ class BenchmarkResult:
     median_latency_ms: float
     p90_latency_ms: float
     p95_latency_ms: float
+
+
+@dataclass
+class ConsistencyResult:
+    """result of a consistency check measuring race conditions."""
+
+    quorum: int
+    total_keys: int
+    total_comparisons: int  # keys × followers
+    matching_values: int  # count where follower[key] == leader[key]
+    consistency_percentage: float  # (matching / total) × 100
+    per_follower_consistency: dict[str, float]  # percentage per follower
 
 
 def calculate_percentile(data: list[float], percentile: float) -> float:
@@ -80,40 +93,43 @@ def calculate_percentile(data: list[float], percentile: float) -> float:
     return sorted_data[lower] * (1 - weight) + sorted_data[upper] * weight
 
 
-def calculate_theoretical_latency(quorum: int, n: int = NUM_FOLLOWERS, 
-                                   delay_min: float = DELAY_MIN, 
-                                   delay_max: float = DELAY_MAX) -> float:
+def calculate_theoretical_latency(
+    quorum: int,
+    n: int = NUM_FOLLOWERS,
+    delay_min: float = DELAY_MIN,
+    delay_max: float = DELAY_MAX,
+) -> float:
     """
     calculate the theoretical expected latency for a given quorum using order statistics.
-    
-    for uniform distribution U(a, b) with n samples, the expected value of the k-th 
+
+    for uniform distribution U(a, b) with n samples, the expected value of the k-th
     order statistic (k-th smallest value) is:
-    
+
         E[X(k:n)] = a + (b - a) * k / (n + 1)
-    
+
     where:
         - a = delay_min (minimum delay)
         - b = delay_max (maximum delay)
         - n = number of followers
         - k = quorum (we wait for the k-th fastest response)
-    
+
     intuitive explanation:
         when we have 5 followers with random delays between 0 and 1000ms,
         and we wait for k of them, we're essentially waiting for the k-th fastest.
-        
+
         imagine sorting 5 random numbers between 0 and 1000:
         - the 1st (fastest) is expected around 1000/6 = 167ms
         - the 2nd is expected around 2000/6 = 333ms
-        - the 3rd is expected around 3000/6 = 500ms  
+        - the 3rd is expected around 3000/6 = 500ms
         - the 4th is expected around 4000/6 = 667ms
         - the 5th (slowest) is expected around 5000/6 = 833ms
-    
+
     args:
         quorum: number of acknowledgments required (k in the formula)
         n: number of followers (samples)
         delay_min: minimum delay (a)
         delay_max: maximum delay (b)
-    
+
     returns:
         expected latency in milliseconds
     """
@@ -149,7 +165,9 @@ async def wait_for_services(timeout: int = 30) -> bool:
                 response = await client.get(f"{LEADER_URL}/health")
                 if response.status_code == 200:
                     # check at least one follower
-                    f_response = await client.get(f"{FOLLOWER_URLS['follower1']}/health")
+                    f_response = await client.get(
+                        f"{FOLLOWER_URLS['follower1']}/health"
+                    )
                     if f_response.status_code == 200:
                         print("  all services ready")
                         return True
@@ -187,8 +205,8 @@ async def run_benchmark(quorum: int) -> BenchmarkResult:
     """
     run benchmark with specified quorum value.
     performs 100 writes (10 keys x 10 writes each, 10 concurrent).
-    
-    uses unique key prefixes per quorum to avoid "mismatched values" 
+
+    uses unique key prefixes per quorum to avoid "mismatched values"
     confusion when checking consistency later.
     """
     print(f"\n--- running benchmark with quorum={quorum} ---")
@@ -341,6 +359,118 @@ async def check_consistency() -> dict[str, Any]:
     return results
 
 
+async def check_race_condition_consistency(quorum: int) -> ConsistencyResult:
+    """
+    check consistency by comparing actual key values across followers vs leader.
+
+    this measures race conditions that occur due to:
+    - with quorum=K, only K followers have the write synchronously
+    - remaining (5-K) followers receive writes asynchronously with random delays
+    - rapid writes to the same key can result in different final values on different
+      followers due to write ordering issues caused by varying network delays
+
+    args:
+        quorum: the quorum value used for the benchmark (to filter keys)
+
+    returns:
+        ConsistencyResult with consistency percentage and per-follower breakdown
+    """
+    print(f"\n--- checking race condition consistency for quorum={quorum} ---")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # get leader data
+        try:
+            leader_response = await client.get(f"{LEADER_URL}/store")
+            leader_data = leader_response.json()
+            leader_store = leader_data["data"]
+        except Exception as e:
+            print(f"  failed to get leader data: {e}")
+            return ConsistencyResult(
+                quorum=quorum,
+                total_keys=0,
+                total_comparisons=0,
+                matching_values=0,
+                consistency_percentage=0.0,
+                per_follower_consistency={},
+            )
+
+        # filter keys for this quorum only (q{quorum}_k0, q{quorum}_k1, ...)
+        quorum_keys = [k for k in leader_store.keys() if k.startswith(f"q{quorum}_")]
+        total_keys = len(quorum_keys)
+
+        if total_keys == 0:
+            print(f"  no keys found for quorum={quorum}")
+            return ConsistencyResult(
+                quorum=quorum,
+                total_keys=0,
+                total_comparisons=0,
+                matching_values=0,
+                consistency_percentage=0.0,
+                per_follower_consistency={},
+            )
+
+        print(f"  leader has {total_keys} keys for quorum={quorum}")
+
+        # fetch all follower data and compare
+        total_comparisons = 0
+        matching_values = 0
+        per_follower_consistency: dict[str, float] = {}
+
+        for name, url in FOLLOWER_URLS.items():
+            try:
+                response = await client.get(f"{url}/store")
+                follower_data = response.json()
+                follower_store = follower_data["data"]
+
+                # compare each key's value against leader
+                follower_matches = 0
+                for key in quorum_keys:
+                    total_comparisons += 1
+                    leader_value = leader_store.get(key)
+                    follower_value = follower_store.get(key)
+
+                    if leader_value == follower_value:
+                        matching_values += 1
+                        follower_matches += 1
+
+                # calculate per-follower consistency percentage
+                follower_pct = (
+                    (follower_matches / total_keys) * 100 if total_keys > 0 else 0.0
+                )
+                per_follower_consistency[name] = follower_pct
+
+                status = (
+                    "consistent" if follower_pct == 100.0 else f"{follower_pct:.1f}%"
+                )
+                print(
+                    f"  {name}: {follower_matches}/{total_keys} keys match - {status}"
+                )
+
+            except Exception as e:
+                print(f"  {name}: error - {e}")
+                per_follower_consistency[name] = 0.0
+
+        # calculate overall consistency percentage
+        consistency_pct = (
+            (matching_values / total_comparisons) * 100
+            if total_comparisons > 0
+            else 0.0
+        )
+
+        print(
+            f"  overall consistency: {matching_values}/{total_comparisons} = {consistency_pct:.2f}%"
+        )
+
+        return ConsistencyResult(
+            quorum=quorum,
+            total_keys=total_keys,
+            total_comparisons=total_comparisons,
+            matching_values=matching_values,
+            consistency_percentage=consistency_pct,
+            per_follower_consistency=per_follower_consistency,
+        )
+
+
 def restart_docker(quorum: int) -> bool:
     """restart docker-compose with specific quorum."""
     print(f"\n  restarting docker with quorum={quorum}...")
@@ -348,7 +478,7 @@ def restart_docker(quorum: int) -> bool:
     try:
         # write the .env file with new quorum
         write_env_file(quorum)
-        
+
         # stop existing containers
         subprocess.run(
             ["docker-compose", "down"],
@@ -359,7 +489,7 @@ def restart_docker(quorum: int) -> bool:
 
         # start with new quorum (will read from .env file)
         subprocess.run(
-            ["docker-compose", "up", "-d", "--build"],
+            ["docker-compose", "up", "-d"],# "--build"],
             capture_output=True,
             check=True,
             cwd=PROJECT_ROOT,
@@ -390,24 +520,44 @@ def plot_latency_percentiles(results: list[BenchmarkResult], output_path: str) -
 
     # plot each metric with different colors and line styles
     plt.plot(
-        quorums, mean_latencies, 
-        color='#2196F3', linestyle='-', linewidth=2, marker='o', markersize=8,
-        label='Mean'
+        quorums,
+        mean_latencies,
+        color="#2196F3",
+        linestyle="-",
+        linewidth=2,
+        marker="o",
+        markersize=8,
+        label="Mean",
     )
     plt.plot(
-        quorums, median_latencies, 
-        color='#4CAF50', linestyle='--', linewidth=2, marker='s', markersize=8,
-        label='Median (p50)'
+        quorums,
+        median_latencies,
+        color="#4CAF50",
+        linestyle="--",
+        linewidth=2,
+        marker="s",
+        markersize=8,
+        label="Median (p50)",
     )
     plt.plot(
-        quorums, p90_latencies, 
-        color='#FF9800', linestyle='-.', linewidth=2, marker='^', markersize=8,
-        label='p90'
+        quorums,
+        p90_latencies,
+        color="#FF9800",
+        linestyle="-.",
+        linewidth=2,
+        marker="^",
+        markersize=8,
+        label="p90",
     )
     plt.plot(
-        quorums, p95_latencies, 
-        color='#F44336', linestyle=':', linewidth=2.5, marker='d', markersize=8,
-        label='p95'
+        quorums,
+        p95_latencies,
+        color="#F44336",
+        linestyle=":",
+        linewidth=2.5,
+        marker="d",
+        markersize=8,
+        label="p95",
     )
 
     plt.xlabel("Write Quorum", fontsize=12)
@@ -415,25 +565,164 @@ def plot_latency_percentiles(results: list[BenchmarkResult], output_path: str) -
     plt.title(
         "Write Latency vs Quorum\n"
         f"(100 writes per quorum, network delay: [{DELAY_MIN}ms, {DELAY_MAX}ms])",
-        fontsize=14
+        fontsize=14,
     )
     plt.xticks(quorums)
-    plt.legend(loc='upper left', fontsize=10)
+    plt.legend(loc="upper left", fontsize=10)
     plt.grid(True, alpha=0.3)
 
     # add value annotations for mean
-    for q, mean, median, p90, p95 in zip(quorums, mean_latencies, median_latencies, p90_latencies, p95_latencies):
+    for q, mean, median, p90, p95 in zip(
+        quorums, mean_latencies, median_latencies, p90_latencies, p95_latencies
+    ):
         # only annotate the rightmost point to avoid clutter
         if q == max(quorums):
             offset = 10
-            plt.annotate(f'{mean:.0f}', (q, mean), textcoords="offset points", 
-                        xytext=(offset, 0), ha='left', fontsize=9, color='#2196F3')
-            plt.annotate(f'{median:.0f}', (q, median), textcoords="offset points", 
-                        xytext=(offset, 0), ha='left', fontsize=9, color='#4CAF50')
-            plt.annotate(f'{p90:.0f}', (q, p90), textcoords="offset points", 
-                        xytext=(offset, 0), ha='left', fontsize=9, color='#FF9800')
-            plt.annotate(f'{p95:.0f}', (q, p95), textcoords="offset points", 
-                        xytext=(offset, 0), ha='left', fontsize=9, color='#F44336')
+            plt.annotate(
+                f"{mean:.0f}",
+                (q, mean),
+                textcoords="offset points",
+                xytext=(offset, 0),
+                ha="left",
+                fontsize=9,
+                color="#2196F3",
+            )
+            plt.annotate(
+                f"{median:.0f}",
+                (q, median),
+                textcoords="offset points",
+                xytext=(offset, 0),
+                ha="left",
+                fontsize=9,
+                color="#4CAF50",
+            )
+            plt.annotate(
+                f"{p90:.0f}",
+                (q, p90),
+                textcoords="offset points",
+                xytext=(offset, 0),
+                ha="left",
+                fontsize=9,
+                color="#FF9800",
+            )
+            plt.annotate(
+                f"{p95:.0f}",
+                (q, p95),
+                textcoords="offset points",
+                xytext=(offset, 0),
+                ha="left",
+                fontsize=9,
+                color="#F44336",
+            )
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    print(f"  saved: {output_path}")
+
+
+def calculate_theoretical_consistency(quorum: int, n: int = NUM_FOLLOWERS) -> float:
+    """
+    calculate the theoretical minimum consistency percentage for a given quorum.
+
+    with quorum=K out of N followers:
+    - K followers are guaranteed to have the correct value (synchronous replication)
+    - remaining (N-K) followers may or may not have received async replication
+
+    theoretical minimum = (K / N) * 100%
+
+    in practice, actual consistency is usually higher because async replication
+    often completes before the consistency check.
+
+    args:
+        quorum: number of acknowledgments required
+        n: number of followers
+
+    returns:
+        theoretical minimum consistency percentage
+    """
+    return (quorum / n) * 100
+
+
+def plot_consistency_vs_quorum(
+    results: list[ConsistencyResult], output_path: str
+) -> None:
+    """
+    generate and save a plot showing consistency percentage vs quorum.
+
+    includes:
+    - solid line: actual measured consistency
+    - dotted line: theoretical minimum consistency (quorum/followers * 100%)
+
+    uses the same visual style as the latency graph.
+    """
+    quorums = [r.quorum for r in results]
+    actual_consistency = [r.consistency_percentage for r in results]
+    theoretical_consistency = [calculate_theoretical_consistency(q) for q in quorums]
+
+    plt.figure(figsize=(10, 6))
+
+    # plot actual consistency (solid line with markers)
+    plt.plot(
+        quorums,
+        actual_consistency,
+        color="#2196F3",
+        linestyle="-",
+        linewidth=2,
+        marker="o",
+        markersize=8,
+        label="Actual Consistency",
+    )
+
+    # plot theoretical minimum (dotted line)
+    plt.plot(
+        quorums,
+        theoretical_consistency,
+        color="#9E9E9E",
+        linestyle=":",
+        linewidth=2,
+        marker="",
+        label="Theoretical Minimum (K/N)",
+    )
+
+    plt.xlabel("Write Quorum", fontsize=12)
+    plt.ylabel("Consistency (%)", fontsize=12)
+    plt.title(
+        "Data Consistency vs Quorum\n"
+        f"(measuring race conditions, network delay: [{DELAY_MIN}ms, {DELAY_MAX}ms])",
+        fontsize=14,
+    )
+    plt.xticks(quorums)
+    plt.ylim(0, 105)  # 0-100% with some padding
+    plt.legend(loc="lower right", fontsize=10)
+    plt.grid(True, alpha=0.3)
+
+    # add value annotations
+    for q, actual, theoretical in zip(
+        quorums, actual_consistency, theoretical_consistency
+    ):
+        # annotate actual values
+        plt.annotate(
+            f"{actual:.1f}%",
+            (q, actual),
+            textcoords="offset points",
+            xytext=(0, 10),
+            ha="center",
+            fontsize=9,
+            color="#2196F3",
+        )
+        # annotate theoretical values (only at first and last point)
+        if q == min(quorums) or q == max(quorums):
+            plt.annotate(
+                f"{theoretical:.0f}%",
+                (q, theoretical),
+                textcoords="offset points",
+                xytext=(0, -15),
+                ha="center",
+                fontsize=9,
+                color="#9E9E9E",
+            )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -443,7 +732,9 @@ def plot_latency_percentiles(results: list[BenchmarkResult], output_path: str) -
 
 
 def generate_report(
-    results: list[BenchmarkResult], consistency: dict[str, Any]
+    results: list[BenchmarkResult],
+    consistency: dict[str, Any],
+    consistency_results: list[ConsistencyResult] | None = None,
 ) -> str:
     """generate text report."""
     lines = []
@@ -464,7 +755,9 @@ def generate_report(
 
     lines.append("LATENCY RESULTS BY QUORUM:")
     lines.append("-" * 80)
-    lines.append(f"{'quorum':<8}{'mean (ms)':<12}{'median (ms)':<14}{'p90 (ms)':<12}{'p95 (ms)':<12}{'success':<10}")
+    lines.append(
+        f"{'quorum':<8}{'mean (ms)':<12}{'median (ms)':<14}{'p90 (ms)':<12}{'p95 (ms)':<12}{'success':<10}"
+    )
     lines.append("-" * 80)
 
     for r in sorted(results, key=lambda x: x.quorum):
@@ -501,7 +794,46 @@ def generate_report(
     lines.append("  - higher quorum = higher latency (wait for slower nodes)")
     lines.append("")
 
-    lines.append("DATA CONSISTENCY:")
+    # race condition consistency results (per quorum)
+    if consistency_results:
+        lines.append("RACE CONDITION CONSISTENCY BY QUORUM:")
+        lines.append("-" * 80)
+        lines.append(
+            f"{'quorum':<8}{'actual (%)':<14}{'theoretical (%)':<18}{'matching':<15}{'total':<10}"
+        )
+        lines.append("-" * 80)
+
+        for cr in sorted(consistency_results, key=lambda x: x.quorum):
+            theoretical = calculate_theoretical_consistency(cr.quorum)
+            lines.append(
+                f"{cr.quorum:<8}{cr.consistency_percentage:<14.2f}{theoretical:<18.1f}"
+                f"{cr.matching_values:<15}{cr.total_comparisons:<10}"
+            )
+
+        lines.append("-" * 80)
+        lines.append("")
+
+        lines.append("RACE CONDITION EXPLANATION:")
+        lines.append("-" * 80)
+        lines.append("  race conditions occur due to varying network delays:")
+        lines.append("  - with quorum=K, only K followers receive writes synchronously")
+        lines.append("  - remaining (5-K) followers receive writes asynchronously")
+        lines.append("  - rapid writes to same key can arrive in different orders")
+        lines.append(
+            "  - this results in different final values on different followers"
+        )
+        lines.append("")
+        lines.append("  theoretical minimum = (quorum / num_followers) * 100%")
+        lines.append(
+            "  actual consistency is often higher due to async replication completing"
+        )
+        lines.append("")
+        lines.append(
+            "  key insight: higher quorum = fewer race conditions = higher consistency"
+        )
+        lines.append("")
+
+    lines.append("EVENTUAL CONSISTENCY (FINAL STATE):")
     lines.append("-" * 80)
     if consistency.get("all_consistent", False):
         lines.append("  all replicas are consistent with leader")
@@ -571,7 +903,7 @@ async def run_single_benchmark():
 async def run_full_quorum_analysis():
     """
     run complete quorum comparison (1-5).
-    
+
     this function:
     1. iterates through quorum values 1-5
     2. for each quorum:
@@ -579,10 +911,10 @@ async def run_full_quorum_analysis():
        - restarts docker-compose
        - waits for services
        - runs benchmark (100 writes with unique keys)
+       - waits for replication and checks race condition consistency
     3. after all benchmarks:
-       - waits for final replication
-       - checks consistency once (not per quorum)
-       - generates 3 plots (actual, theoretical, comparison)
+       - checks eventual consistency once
+       - generates latency and consistency plots
        - saves report
     """
     print("=" * 60)
@@ -590,13 +922,14 @@ async def run_full_quorum_analysis():
     print("=" * 60)
 
     results: list[BenchmarkResult] = []
+    consistency_results: list[ConsistencyResult] = []
     results_dir = Path("results")
     results_dir.mkdir(exist_ok=True)
 
     for quorum in range(1, 6):
-        print(f"\n{'='*40}")
+        print(f"\n{'=' * 40}")
         print(f"TESTING QUORUM = {quorum}")
-        print(f"{'='*40}")
+        print(f"{'=' * 40}")
 
         # restart docker with new quorum
         if not restart_docker(quorum):
@@ -612,9 +945,21 @@ async def run_full_quorum_analysis():
         result = await run_benchmark(quorum)
         results.append(result)
 
-        # save intermediate result
+        # save intermediate benchmark result
         with open(results_dir / f"quorum_{quorum}.json", "w") as f:
             json.dump(asdict(result), f, indent=2)
+
+        # wait for replication to complete, then check for race conditions
+        print("\n  waiting for replication to settle...")
+        await asyncio.sleep(6)
+
+        # check race condition consistency for this quorum's keys
+        consistency_result = await check_race_condition_consistency(quorum)
+        consistency_results.append(consistency_result)
+
+        # save intermediate consistency result
+        with open(results_dir / f"consistency_{quorum}.json", "w") as f:
+            json.dump(asdict(consistency_result), f, indent=2)
 
     if not results:
         print("no results collected")
@@ -627,30 +972,41 @@ async def run_full_quorum_analysis():
     print("\nwaiting for async replication to complete...")
     await asyncio.sleep(5)
 
-    # check consistency ONCE at the end (not per quorum)
+    # check eventual consistency ONCE at the end (not per quorum)
     consistency = await check_consistency()
 
     # generate the combined latency plot
-    print("\n--- generating plot ---")
+    print("\n--- generating plots ---")
     plot_latency_percentiles(results, str(results_dir / "latency_percentiles.png"))
 
+    # generate the consistency vs quorum plot
+    if consistency_results:
+        plot_consistency_vs_quorum(
+            consistency_results, str(results_dir / "consistency.png")
+        )
+
     # generate final report
-    report = generate_report(results, consistency)
+    report = generate_report(results, consistency, consistency_results)
     print("\n" + report)
 
     # save results
     (results_dir / "full_report.txt").write_text(report)
     with open(results_dir / "all_results.json", "w") as f:
         json.dump([asdict(r) for r in results], f, indent=2)
+    with open(results_dir / "consistency_results.json", "w") as f:
+        json.dump([asdict(r) for r in consistency_results], f, indent=2)
 
     print("\n" + "=" * 60)
     print("ANALYSIS COMPLETE!")
     print("=" * 60)
     print("\nfiles saved in results/ directory:")
-    print("  - latency_percentiles.png (mean, median, p90, p95 plot)")
-    print("  - full_report.txt         (text report)")
-    print("  - all_results.json        (raw benchmark data)")
-    print("  - quorum_*.json           (per-quorum results)")
+    print("  - latency_percentiles.png  (mean, median, p90, p95 plot)")
+    print("  - consistency.png          (consistency vs quorum plot)")
+    print("  - full_report.txt          (text report)")
+    print("  - all_results.json         (raw benchmark data)")
+    print("  - consistency_results.json (raw consistency data)")
+    print("  - quorum_*.json            (per-quorum benchmark results)")
+    print("  - consistency_*.json       (per-quorum consistency results)")
 
 
 async def run_consistency_check():
