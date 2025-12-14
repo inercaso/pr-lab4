@@ -586,50 +586,6 @@ this plot shows four latency metrics for each quorum value:
 3. p90 and p95 show tail latency - occasional slow responses
 4. at quorum=5, mean (~865ms) approaches the max delay (1000ms)
 
-### Race Condition Consistency Analysis
-
-the consistency check measures how many (key, follower) pairs have matching values between the leader and followers after writes complete. this captures race conditions caused by per-message network delays:
-
-| quorum | actual (%) | theoretical (%) | matching | total |
-|--------|------------|-----------------|----------|-------|
-| 1 | 44.0 | 20.0 | 22 | 50 |
-| 2 | 84.0 | 40.0 | 42 | 50 |
-| 3 | 90.0 | 60.0 | 45 | 50 |
-| 4 | 94.0 | 80.0 | 47 | 50 |
-| 5 | 100.0 | 100.0 | 50 | 50 |
-
-### Consistency vs Quorum Plot
-
-![consistency vs quorum](results/consistency.png)
-
-this plot shows:
-- **Actual Consistency** (blue solid line): measured percentage of matching key-value pairs
-- **Theoretical Minimum** (gray dotted line): K/N × 100% where K is quorum and N is number of followers
-
-**key observations:**
-1. consistency increases with quorum (logarithmic-like curve)
-2. actual consistency exceeds theoretical minimum because async replication often completes
-3. quorum=5 guarantees 100% consistency (all followers ACK before write returns)
-4. quorum=1 shows only 44% consistency due to race conditions from async replication
-
-### Why Race Conditions Occur
-
-with quorum=K, the leader waits for K followers to ACK before responding. however, each replication message has an independent random delay:
-
-```
-write "key1" = "value_0" → replication to follower1 with delay=800ms
-write "key1" = "value_1" → replication to follower1 with delay=100ms
-write "key1" = "value_2" → replication to follower1 with delay=500ms
-...
-```
-
-even though writes are sequential at the client, the replication messages can arrive out of order at followers. this causes different followers to have different final values for the same key.
-
-**higher quorum reduces this effect because:**
-- more followers must ACK before the write returns
-- this synchronizes more followers to the same state
-- at quorum=5, all followers have the latest value before the next write starts
-
 ### Understanding Percentiles
 
 | percentile | meaning | why it matters |
@@ -662,33 +618,69 @@ quorum=5: wait for SLOWEST follower   → mean ~897ms
 
 this is the fundamental **consistency vs latency** trade-off in distributed systems.
 
-### Consistency Check Results
+### Value-Based Consistency Analysis
 
-**important note:** since the key-value store is in-memory and docker containers are restarted between quorum tests, each test starts with an empty store. the final consistency check only verifies the last quorum=5 run.
+unlike simple key-count checks, this analysis compares the **actual values** of each key between the leader and all followers. this reveals race conditions that occur during replication.
 
-after the quorum=5 benchmark (10 unique keys, 100 writes):
+#### methodology
+
+for each quorum value (1-5), after the benchmark completes:
+1. fetch all key-value pairs from the leader
+2. fetch all key-value pairs from each follower
+3. compare each (key, follower) pair: does `follower[key] == leader[key]`?
+4. calculate consistency percentage = matching pairs / total pairs × 100%
+
+#### per-quorum consistency results
+
+| quorum | actual (%) | theoretical (%) | matching pairs | total pairs |
+|--------|------------|-----------------|----------------|-------------|
+| 1 | 44.0 | 20.0 | 22 | 50 |
+| 2 | 84.0 | 40.0 | 42 | 50 |
+| 3 | 90.0 | 60.0 | 45 | 50 |
+| 4 | 94.0 | 80.0 | 47 | 50 |
+| 5 | 100.0 | 100.0 | 50 | 50 |
+
+- **total pairs** = 10 keys × 5 followers = 50 comparisons per quorum
+- **theoretical minimum** = (quorum / num_followers) × 100% = K/5 × 100%
+
+#### consistency vs quorum plot
+
+![consistency vs quorum](results/consistency.png)
+
+this plot visualizes:
+- **blue solid line (Actual Consistency)**: measured percentage of matching key-value pairs
+- **gray dotted line (Theoretical Minimum)**: expected minimum based on quorum size (K/N × 100%)
+
+#### key observations
+
+1. **logarithmic-like curve**: consistency increases rapidly at first, then plateaus
+   - quorum 1→2: +40% improvement (44% → 84%)
+   - quorum 4→5: +6% improvement (94% → 100%)
+
+2. **actual exceeds theoretical**: the gray line represents the worst-case minimum where only K followers are synchronized and the rest have 0% match. in practice, async replication often completes before the next write, boosting consistency.
+
+3. **quorum=5 guarantees 100%**: when all 5 followers must ACK before the write returns, all followers are synchronized before the next write begins. no race conditions possible.
+
+4. **quorum=1 shows significant inconsistency**: with only 1 follower ACK required, the other 4 receive writes asynchronously. per-message random delays cause writes to arrive out of order, resulting in only 44% consistency.
+
+#### race condition mechanism
+
+the root cause is **per-message independent delays**. even with sequential client writes:
 
 ```
---- checking data consistency ---
-  leader has 10 keys
-  follower1: 10 keys
-  follower2: 10 keys
-  follower3: 10 keys
-  follower4: 10 keys
-  follower5: 10 keys
+time=0ms:   write("key1", "v0") → leader sends to all followers
+            follower1 delay=800ms, follower2 delay=100ms, ...
+
+time=50ms:  write("key1", "v1") → leader sends to all followers  
+            follower1 delay=100ms, follower2 delay=900ms, ...
+
+result on follower1:
+  - receives "v1" at 150ms (0+50+100)
+  - receives "v0" at 800ms (0+800)
+  - final value = "v0" (WRONG - should be "v1")
 ```
 
-**observed behavior:**
-- all nodes have the same 10 keys
-- key count matches across all replicas
-- semi-synchronous replication ensures quorum copies before acknowledging writes
-- async background replication propagates to remaining followers
-
-**why eventual consistency works:**
-1. writes to same key may arrive in different order on different followers
-2. the last write wins (no conflict resolution)
-3. after replication completes, all nodes converge to the same final state
-4. the 5-second wait after benchmark ensures async replication finishes
+with quorum=K, K followers must ACK synchronously. this forces those K followers to have the correct value before the next write starts. higher K = more synchronized followers = higher consistency.
 
 ---
 
