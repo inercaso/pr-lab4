@@ -1182,7 +1182,7 @@ async def run_quorum_analysis_basic():
 
     # generate plots
     print("\n--- generating BASIC plots ---")
-    plot_latency_percentiles(results, str(results_dir / "latency_percentiles.png"))
+    plot_latency_percentiles(results, str(results_dir / "latency_basic.png"))
     if consistency_results:
         plot_consistency_basic(
             consistency_results, str(results_dir / "consistency_basic.png")
@@ -1271,7 +1271,7 @@ async def run_quorum_analysis_versioned():
 
     # generate plots
     print("\n--- generating VERSIONED plots ---")
-    plot_latency_percentiles(results, str(results_dir / "latency_percentiles.png"))
+    plot_latency_percentiles(results, str(results_dir / "latency_versioned.png"))
     if consistency_results:
         plot_consistency_versioned(
             consistency_results, str(results_dir / "consistency_versioned.png")
@@ -1336,10 +1336,11 @@ async def run_full_quorum_analysis():
     print("FULL ANALYSIS COMPLETE!")
     print("=" * 60)
     print("\nfiles saved in results/ directory:")
+    print("  - latency_basic.png          (basic mode latency)")
     print("  - consistency_basic.png      (basic mode - race conditions)")
+    print("  - latency_versioned.png      (versioned mode latency)")
     print("  - consistency_versioned.png  (versioned mode - no race conditions)")
     print("  - consistency_comparison.png (side-by-side comparison)")
-    print("  - latency_percentiles.png    (latency metrics)")
     print("  - basic_report.txt           (basic mode report)")
     print("  - versioned_report.txt       (versioned mode report)")
 

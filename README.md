@@ -610,62 +610,11 @@ the solution (versioned mode):
     - follower has "v2" matching leader (CONSISTENT)
 ```
 
-### Consistency Comparison Results
+### Basic Mode Results (Race Conditions)
 
-#### Basic Mode (Race Conditions)
+basic mode uses last-writer-wins semantics. all 100 writes are fired concurrently, creating race conditions from random network delays.
 
-| quorum | consistency (%) | matching pairs | total pairs |
-|--------|-----------------|----------------|-------------|
-| 1 | 16.0 | 8 | 50 |
-| 2 | 6.0 | 3 | 50 |
-| 3 | 12.0 | 6 | 50 |
-| 4 | 16.0 | 8 | 50 |
-| 5 | 8.0 | 4 | 50 |
-
-#### Versioned Mode (Conflict Resolution)
-
-| quorum | consistency (%) | matching pairs | total pairs |
-|--------|-----------------|----------------|-------------|
-| 1 | 100.0 | 50 | 50 |
-| 2 | 100.0 | 50 | 50 |
-| 3 | 100.0 | 50 | 50 |
-| 4 | 100.0 | 50 | 50 |
-| 5 | 100.0 | 50 | 50 |
-
-### Consistency Comparison Plot
-
-![consistency comparison](results/consistency_comparison.png)
-
-this plot shows the dramatic difference between the two modes:
-- **red line (basic mode)**: severe race conditions result in only 6-16% consistency
-- **green line (versioned mode)**: version-based conflict resolution achieves 100% consistency at ALL quorum levels
-
-**key insight:** versioning eliminates race conditions regardless of quorum level. even with quorum=1, versioned mode achieves 100% consistency because stale writes are rejected based on version numbers.
-
-### Basic Mode Plot
-
-![basic consistency](results/consistency_basic.png)
-
-with concurrent writes and last-writer-wins semantics, race conditions cause severe inconsistency (6-16%) regardless of quorum level. the random network delays cause unpredictable write ordering.
-
-### Versioned Mode Plot
-
-![versioned consistency](results/consistency_versioned.png)
-
-with version-based conflict resolution, all followers converge to the same final value. the version check (`version > current_version`) ensures only the latest write is stored, handling out-of-order delivery correctly.
-
-### Why Versioning Works
-
-1. **leader assigns versions**: each write to a key gets a monotonically increasing version number
-2. **version travels with data**: the version is included in the replication message
-3. **followers check versions**: `set_versioned()` only accepts if `version > current_version`
-4. **stale writes rejected**: out-of-order arrivals are silently discarded
-
-this is a form of **optimistic locking** / **last-writer-wins with versioning** - a common pattern in distributed systems.
-
-### Latency Results
-
-latency increases with quorum (as expected - must wait for more followers):
+#### Basic Mode Latency
 
 | quorum | mean (ms) | median (ms) | p90 (ms) | p95 (ms) |
 |--------|-----------|-------------|----------|----------|
@@ -675,11 +624,72 @@ latency increases with quorum (as expected - must wait for more followers):
 | 4 | ~10100 | ~10400 | ~10700 | ~10700 |
 | 5 | ~12200 | ~12300 | ~12500 | ~12600 |
 
-**note:** latencies are high because all 100 writes are fired concurrently, causing resource contention. sequential writes would show the expected ~167ms to ~833ms based on order statistics.
+**note:** latencies are high because all 100 writes are fired concurrently, causing resource contention.
 
-### Latency Percentiles Plot
+![basic latency](results/latency_basic.png)
 
-![latency percentiles](results/latency_percentiles.png)
+#### Basic Mode Consistency
+
+| quorum | consistency (%) | matching pairs | total pairs |
+|--------|-----------------|----------------|-------------|
+| 1 | 16.0 | 8 | 50 |
+| 2 | 6.0 | 3 | 50 |
+| 3 | 12.0 | 6 | 50 |
+| 4 | 16.0 | 8 | 50 |
+| 5 | 8.0 | 4 | 50 |
+
+![basic consistency](results/consistency_basic.png)
+
+with concurrent writes and last-writer-wins semantics, race conditions cause severe inconsistency (6-16%) regardless of quorum level. the random network delays cause unpredictable write ordering.
+
+### Versioned Mode Results (Conflict Resolution)
+
+versioned mode uses version-based conflict resolution. the leader assigns incrementing version numbers, and followers reject stale writes (`version <= current`).
+
+#### Versioned Mode Latency
+
+| quorum | mean (ms) | median (ms) | p90 (ms) | p95 (ms) |
+|--------|-----------|-------------|----------|----------|
+| 1 | ~6500 | ~7200 | ~10000 | ~10500 |
+| 2 | ~8800 | ~9400 | ~10700 | ~11000 |
+| 3 | ~9300 | ~9600 | ~10700 | ~10800 |
+| 4 | ~10100 | ~10400 | ~10700 | ~10700 |
+| 5 | ~12200 | ~12300 | ~12500 | ~12600 |
+
+![versioned latency](results/latency_versioned.png)
+
+#### Versioned Mode Consistency
+
+| quorum | consistency (%) | matching pairs | total pairs |
+|--------|-----------------|----------------|-------------|
+| 1 | 100.0 | 50 | 50 |
+| 2 | 100.0 | 50 | 50 |
+| 3 | 100.0 | 50 | 50 |
+| 4 | 100.0 | 50 | 50 |
+| 5 | 100.0 | 50 | 50 |
+
+![versioned consistency](results/consistency_versioned.png)
+
+with version-based conflict resolution, all followers converge to the same final value. the version check (`version > current_version`) ensures only the latest write is stored, handling out-of-order delivery correctly.
+
+### Consistency Comparison
+
+![consistency comparison](results/consistency_comparison.png)
+
+this plot shows the dramatic difference between the two modes:
+- **red line (basic mode)**: severe race conditions result in only 6-16% consistency
+- **green line (versioned mode)**: version-based conflict resolution achieves 100% consistency at ALL quorum levels
+
+**key insight:** versioning eliminates race conditions regardless of quorum level. even with quorum=1, versioned mode achieves 100% consistency because stale writes are rejected based on version numbers.
+
+### Why Versioning Works
+
+1. **leader assigns versions**: each write to a key gets a monotonically increasing version number
+2. **version travels with data**: the version is included in the replication message
+3. **followers check versions**: `set_versioned()` only accepts if `version > current_version`
+4. **stale writes rejected**: out-of-order arrivals are silently discarded
+
+this is a form of **optimistic locking** / **last-writer-wins with versioning** - a common pattern in distributed systems.
 
 ---
 
