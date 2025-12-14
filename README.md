@@ -551,10 +551,12 @@ tests/test_integration.py::TestConcurrentWrites::test_concurrent_writes_same_key
 | total writes per quorum | 100 |
 | number of keys per quorum | 10 |
 | writes per key | 10 |
-| concurrent batch size | 10 |
+| write mode | sequential (one at a time) |
 | network delay range | [0ms, 1000ms] |
 | quorum values tested | 1, 2, 3, 4, 5 |
 | total keys across all tests | 50 (10 per quorum x 5 quorums) |
+
+**Note:** Writes are performed sequentially to ensure deterministic final values. This allows proper measurement of race conditions caused by network delays during replication, rather than race conditions from concurrent client writes.
 
 ### Full Quorum Analysis Results
 
@@ -562,11 +564,11 @@ the benchmark was run for each quorum value (1-5), restarting docker between run
 
 | quorum | mean (ms) | median (ms) | p90 (ms) | p95 (ms) | min (ms) | max (ms) | success |
 |--------|-----------|-------------|----------|----------|----------|----------|---------|
-| 1 | 239 | 220 | 435 | 506 | 58 | 656 | 100/100 |
-| 2 | 406 | 405 | 668 | 751 | 95 | 848 | 100/100 |
-| 3 | 555 | 546 | 832 | 877 | 161 | 962 | 100/100 |
-| 4 | 740 | 763 | 961 | 1011 | 300 | 1089 | 100/100 |
-| 5 | 897 | 946 | 1056 | 1070 | 446 | 1086 | 100/100 |
+| 1 | 171 | 133 | 336 | 388 | 15 | 675 | 100/100 |
+| 2 | 335 | 304 | 642 | 661 | 45 | 796 | 100/100 |
+| 3 | 517 | 498 | 784 | 868 | 81 | 963 | 100/100 |
+| 4 | 656 | 674 | 907 | 956 | 193 | 1010 | 100/100 |
+| 5 | 865 | 903 | 999 | 1010 | 412 | 1015 | 100/100 |
 
 ### Latency Percentiles Plot
 
@@ -582,7 +584,51 @@ this plot shows four latency metrics for each quorum value:
 1. all metrics increase as quorum increases (expected behavior)
 2. mean and median are close, indicating symmetric distribution
 3. p90 and p95 show tail latency - occasional slow responses
-4. at quorum=5, mean (~897ms) approaches the max delay (1000ms)
+4. at quorum=5, mean (~865ms) approaches the max delay (1000ms)
+
+### Race Condition Consistency Analysis
+
+the consistency check measures how many (key, follower) pairs have matching values between the leader and followers after writes complete. this captures race conditions caused by per-message network delays:
+
+| quorum | actual (%) | theoretical (%) | matching | total |
+|--------|------------|-----------------|----------|-------|
+| 1 | 44.0 | 20.0 | 22 | 50 |
+| 2 | 84.0 | 40.0 | 42 | 50 |
+| 3 | 90.0 | 60.0 | 45 | 50 |
+| 4 | 94.0 | 80.0 | 47 | 50 |
+| 5 | 100.0 | 100.0 | 50 | 50 |
+
+### Consistency vs Quorum Plot
+
+![consistency vs quorum](results/consistency.png)
+
+this plot shows:
+- **Actual Consistency** (blue solid line): measured percentage of matching key-value pairs
+- **Theoretical Minimum** (gray dotted line): K/N × 100% where K is quorum and N is number of followers
+
+**key observations:**
+1. consistency increases with quorum (logarithmic-like curve)
+2. actual consistency exceeds theoretical minimum because async replication often completes
+3. quorum=5 guarantees 100% consistency (all followers ACK before write returns)
+4. quorum=1 shows only 44% consistency due to race conditions from async replication
+
+### Why Race Conditions Occur
+
+with quorum=K, the leader waits for K followers to ACK before responding. however, each replication message has an independent random delay:
+
+```
+write "key1" = "value_0" → replication to follower1 with delay=800ms
+write "key1" = "value_1" → replication to follower1 with delay=100ms
+write "key1" = "value_2" → replication to follower1 with delay=500ms
+...
+```
+
+even though writes are sequential at the client, the replication messages can arrive out of order at followers. this causes different followers to have different final values for the same key.
+
+**higher quorum reduces this effect because:**
+- more followers must ACK before the write returns
+- this synchronizes more followers to the same state
+- at quorum=5, all followers have the latest value before the next write starts
 
 ### Understanding Percentiles
 

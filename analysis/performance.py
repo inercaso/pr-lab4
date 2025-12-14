@@ -69,7 +69,12 @@ class BenchmarkResult:
 
 @dataclass
 class ConsistencyResult:
-    """result of a consistency check measuring race conditions."""
+    """
+    result of a consistency check measuring race conditions.
+
+    measures the percentage of key-value pairs that match between leader and followers.
+    this captures the effect of race conditions from concurrent writes with network delays.
+    """
 
     quorum: int
     total_keys: int
@@ -204,10 +209,10 @@ async def single_write(
 async def run_benchmark(quorum: int) -> BenchmarkResult:
     """
     run benchmark with specified quorum value.
-    performs 100 writes (10 keys x 10 writes each, 10 concurrent).
+    performs 100 writes (10 keys x 10 writes each) SEQUENTIALLY to avoid
+    race conditions from concurrent writes to the same key.
 
-    uses unique key prefixes per quorum to avoid "mismatched values"
-    confusion when checking consistency later.
+    uses unique key prefixes per quorum to allow per-quorum consistency checking.
     """
     print(f"\n--- running benchmark with quorum={quorum} ---")
 
@@ -216,38 +221,33 @@ async def run_benchmark(quorum: int) -> BenchmarkResult:
     failed = 0
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # generate all write tasks with unique keys per quorum
+        # generate all write tasks - 10 keys, each written 10 times
         tasks = []
         for key_idx in range(NUM_KEYS):
-            # unique key per quorum: q1_k0, q1_k1, ..., q2_k0, q2_k1, ...
             key = f"q{quorum}_k{key_idx}"
             for write_idx in range(WRITES_PER_KEY):
-                # final value will be the last write
-                value = f"quorum{quorum}_key{key_idx}_write{write_idx}"
+                value = f"value_{write_idx}"
                 tasks.append((key, value))
 
         total_writes = len(tasks)
         print(f"  total writes: {total_writes}")
-        print(f"  concurrent batch size: {CONCURRENT_BATCH_SIZE}")
+        print(f"  mode: sequential (one write at a time)")
 
         start_time = time.perf_counter()
 
-        # process in batches
-        for i in range(0, len(tasks), CONCURRENT_BATCH_SIZE):
-            batch = tasks[i : i + CONCURRENT_BATCH_SIZE]
-            batch_tasks = [single_write(client, key, value) for key, value in batch]
-            results = await asyncio.gather(*batch_tasks)
+        # process SEQUENTIALLY to ensure deterministic final values
+        for i, (key, value) in enumerate(tasks):
+            success, latency = await single_write(client, key, value)
+            latencies.append(latency)
+            if success:
+                successful += 1
+            else:
+                failed += 1
 
-            for success, latency in results:
-                latencies.append(latency)
-                if success:
-                    successful += 1
-                else:
-                    failed += 1
+            if (i + 1) % 20 == 0:
+                print(f"  progress: {i + 1}/{total_writes} writes")
 
-            completed = min(i + CONCURRENT_BATCH_SIZE, len(tasks))
-            print(f"  progress: {completed}/{total_writes} writes")
-
+        print(f"  progress: {total_writes}/{total_writes} writes")
         total_time = time.perf_counter() - start_time
 
     avg_latency = sum(latencies) / len(latencies) if latencies else 0
@@ -361,13 +361,12 @@ async def check_consistency() -> dict[str, Any]:
 
 async def check_race_condition_consistency(quorum: int) -> ConsistencyResult:
     """
-    check consistency by comparing actual key values across followers vs leader.
+    check consistency by comparing key values between leader and followers.
 
-    this measures race conditions that occur due to:
-    - with quorum=K, only K followers have the write synchronously
-    - remaining (5-K) followers receive writes asynchronously with random delays
-    - rapid writes to the same key can result in different final values on different
-      followers due to write ordering issues caused by varying network delays
+    measures the percentage of (key, follower) pairs where the values match.
+    this captures race conditions from concurrent writes with network delays:
+    - higher quorum = more followers have consistent data = higher %
+    - lower quorum = more async replication = more race conditions = lower %
 
     args:
         quorum: the quorum value used for the benchmark (to filter keys)
@@ -411,7 +410,7 @@ async def check_race_condition_consistency(quorum: int) -> ConsistencyResult:
 
         print(f"  leader has {total_keys} keys for quorum={quorum}")
 
-        # fetch all follower data and compare
+        # count matching key-value pairs across all followers
         total_comparisons = 0
         matching_values = 0
         per_follower_consistency: dict[str, float] = {}
@@ -422,35 +421,25 @@ async def check_race_condition_consistency(quorum: int) -> ConsistencyResult:
                 follower_data = response.json()
                 follower_store = follower_data["data"]
 
-                # compare each key's value against leader
+                # count how many keys match for this follower
                 follower_matches = 0
                 for key in quorum_keys:
                     total_comparisons += 1
-                    leader_value = leader_store.get(key)
-                    follower_value = follower_store.get(key)
-
-                    if leader_value == follower_value:
+                    if leader_store.get(key) == follower_store.get(key):
                         matching_values += 1
                         follower_matches += 1
 
-                # calculate per-follower consistency percentage
-                follower_pct = (
-                    (follower_matches / total_keys) * 100 if total_keys > 0 else 0.0
-                )
+                follower_pct = (follower_matches / total_keys) * 100
                 per_follower_consistency[name] = follower_pct
-
-                status = (
-                    "consistent" if follower_pct == 100.0 else f"{follower_pct:.1f}%"
-                )
                 print(
-                    f"  {name}: {follower_matches}/{total_keys} keys match - {status}"
+                    f"  {name}: {follower_matches}/{total_keys} keys match ({follower_pct:.1f}%)"
                 )
 
             except Exception as e:
                 print(f"  {name}: error - {e}")
                 per_follower_consistency[name] = 0.0
 
-        # calculate overall consistency percentage
+        # overall consistency = matching / total comparisons
         consistency_pct = (
             (matching_values / total_comparisons) * 100
             if total_comparisons > 0
@@ -458,7 +447,7 @@ async def check_race_condition_consistency(quorum: int) -> ConsistencyResult:
         )
 
         print(
-            f"  overall consistency: {matching_values}/{total_comparisons} = {consistency_pct:.2f}%"
+            f"  overall: {matching_values}/{total_comparisons} = {consistency_pct:.1f}%"
         )
 
         return ConsistencyResult(
@@ -489,7 +478,7 @@ def restart_docker(quorum: int) -> bool:
 
         # start with new quorum (will read from .env file)
         subprocess.run(
-            ["docker-compose", "up", "-d"],# "--build"],
+            ["docker-compose", "up", "-d"],  # "--build"],
             capture_output=True,
             check=True,
             cwd=PROJECT_ROOT,
@@ -806,7 +795,7 @@ def generate_report(
         for cr in sorted(consistency_results, key=lambda x: x.quorum):
             theoretical = calculate_theoretical_consistency(cr.quorum)
             lines.append(
-                f"{cr.quorum:<8}{cr.consistency_percentage:<14.2f}{theoretical:<18.1f}"
+                f"{cr.quorum:<8}{cr.consistency_percentage:<14.1f}{theoretical:<18.1f}"
                 f"{cr.matching_values:<15}{cr.total_comparisons:<10}"
             )
 
@@ -815,21 +804,23 @@ def generate_report(
 
         lines.append("RACE CONDITION EXPLANATION:")
         lines.append("-" * 80)
-        lines.append("  race conditions occur due to varying network delays:")
-        lines.append("  - with quorum=K, only K followers receive writes synchronously")
-        lines.append("  - remaining (5-K) followers receive writes asynchronously")
-        lines.append("  - rapid writes to same key can arrive in different orders")
         lines.append(
-            "  - this results in different final values on different followers"
+            "  consistency = % of (key, follower) pairs where values match leader."
+        )
+        lines.append(
+            "  race conditions from concurrent writes + network delays cause mismatches:"
         )
         lines.append("")
-        lines.append("  theoretical minimum = (quorum / num_followers) * 100%")
+        lines.append("  - with quorum=K, K followers ACK before leader responds")
+        lines.append("  - but per-message delays cause writes to arrive out of order")
+        lines.append("  - earlier writes with longer delays can overwrite later writes")
         lines.append(
-            "  actual consistency is often higher due to async replication completing"
+            "  - higher quorum = more synchronized followers = higher consistency"
         )
         lines.append("")
+        lines.append("  theoretical = (quorum / num_followers) * 100%")
         lines.append(
-            "  key insight: higher quorum = fewer race conditions = higher consistency"
+            "  (assumes K followers are fully consistent, others have 0% match)"
         )
         lines.append("")
 

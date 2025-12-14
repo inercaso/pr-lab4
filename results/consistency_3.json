@@ -2,13 +2,13 @@
   "quorum": 3,
   "total_keys": 10,
   "total_comparisons": 50,
-  "matching_values": 7,
-  "consistency_percentage": 14.000000000000002,
+  "matching_values": 45,
+  "consistency_percentage": 90.0,
   "per_follower_consistency": {
-    "follower1": 10.0,
-    "follower2": 10.0,
-    "follower3": 20.0,
-    "follower4": 10.0,
-    "follower5": 20.0
+    "follower1": 100.0,
+    "follower2": 80.0,
+    "follower3": 90.0,
+    "follower4": 90.0,
+    "follower5": 90.0
   }
 }
