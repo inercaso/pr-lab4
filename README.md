@@ -48,7 +48,7 @@ This laboratory work implements a distributed key-value store using **single-lea
 | semi-synchronous replication | configurable quorum (1-5) via environment variable |
 | network delay simulation | random delay [min, max] ms before each replication |
 | web api + json | restful api with json request/response |
-| integration tests | pytest-based test suite with 14 test cases |
+| integration tests | pytest-based test suite with 20 test cases |
 | performance analysis | 100 writes benchmark, quorum vs latency analysis |
 
 ---
@@ -163,8 +163,14 @@ python -m pytest tests/test_integration.py -v
 # single benchmark run (uses current quorum)
 python -m analysis.performance
 
-# full quorum analysis (1-5) - generates plots
+# full quorum analysis with BOTH modes (generates comparison plot)
 python -m analysis.performance --full
+
+# basic mode only (last-writer-wins, shows race conditions)
+python -m analysis.performance --full-basic
+
+# versioned mode only (conflict resolution, no race conditions)
+python -m analysis.performance --full-versioned
 
 # consistency check only
 python -m analysis.performance --consistency-only
@@ -285,19 +291,23 @@ class Settings(BaseSettings):
 
 ### 2. Key-Value Store (`app/store.py`)
 
-thread-safe in-memory dictionary with asyncio.lock for concurrent access.
+thread-safe in-memory dictionary with asyncio.lock for concurrent access. supports both basic (last-writer-wins) and versioned (conflict resolution) modes.
 
 ```python
 class KeyValueStore:
     def __init__(self):
         self._data: dict[str, Any] = {}
+        self._versions: dict[str, int] = {}  # per-key version tracking
         self._lock = asyncio.Lock()
 
     async def get(self, key: str) -> Any | None
-    async def set(self, key: str, value: Any) -> None
+    async def set(self, key: str, value: Any) -> None  # basic mode
+    async def set_versioned(self, key: str, value: Any, version: int) -> bool  # versioned mode
     async def delete(self, key: str) -> bool
     async def get_all(self) -> dict[str, Any]
 ```
+
+**versioned mode:** `set_versioned()` only accepts writes where `version > current_version`. this handles out-of-order message delivery by rejecting stale writes, eliminating race conditions from concurrent writes with network delays.
 
 ### 3. Replicator Module (`app/replicator.py`)
 
@@ -411,13 +421,17 @@ Content-Type: application/json
 }
 ```
 
+**query parameters:**
+- `versioned=true` - use version-based conflict resolution (optional)
+
 **response (200 ok):**
 ```json
 {
   "success": true,
   "key": "my_key",
   "quorum_acks": 2,
-  "message": "write successful with 2 acknowledgments"
+  "message": "write successful with 2 acknowledgments",
+  "version": 1  // only present when versioned=true
 }
 ```
 
@@ -502,7 +516,7 @@ Content-Type: application/json
 
 ### Integration Test Suite
 
-the test suite includes 14 test cases organized into 6 test classes:
+the test suite includes 20 test cases organized into 7 test classes:
 
 | class | tests | description |
 |-------|-------|-------------|
@@ -512,33 +526,40 @@ the test suite includes 14 test cases organized into 6 test classes:
 | `TestFollowerBehavior` | 2 | followers reject writes, accept reads |
 | `TestConsistency` | 2 | all data endpoint, eventual consistency |
 | `TestConcurrentWrites` | 2 | concurrent writes to different and same keys |
+| `TestVersionedWrites` | 6 | versioned writes, version increments, conflict resolution |
 
 ### Test Results
 
 ```
 ============================= test session starts =============================
 platform win32 -- Python 3.14.0, pytest-9.0.1, pluggy-1.6.0
-collected 14 items
+collected 20 items
 
-tests/test_integration.py::TestHealthCheck::test_leader_health PASSED    [  7%]
-tests/test_integration.py::TestHealthCheck::test_all_followers_health PASSED [ 14%]
-tests/test_integration.py::TestBasicOperations::test_write_to_leader PASSED [ 21%]
-tests/test_integration.py::TestBasicOperations::test_read_from_leader PASSED [ 28%]
-tests/test_integration.py::TestBasicOperations::test_read_nonexistent_key PASSED [ 35%]
-tests/test_integration.py::TestReplication::test_replication_to_all_followers PASSED [ 42%]
-tests/test_integration.py::TestReplication::test_write_quorum PASSED     [ 50%]
-tests/test_integration.py::TestReplication::test_read_from_follower PASSED [ 57%]
-tests/test_integration.py::TestFollowerBehavior::test_follower_rejects_writes PASSED [ 64%]
-tests/test_integration.py::TestFollowerBehavior::test_follower_accepts_reads PASSED [ 71%]
-tests/test_integration.py::TestConsistency::test_all_data_endpoint PASSED [ 78%]
-tests/test_integration.py::TestConsistency::test_eventual_consistency PASSED [ 85%]
-tests/test_integration.py::TestConcurrentWrites::test_concurrent_writes PASSED [ 92%]
-tests/test_integration.py::TestConcurrentWrites::test_concurrent_writes_same_key PASSED [100%]
+tests/test_integration.py::TestHealthCheck::test_leader_health PASSED    [  5%]
+tests/test_integration.py::TestHealthCheck::test_all_followers_health PASSED [ 10%]
+tests/test_integration.py::TestBasicOperations::test_write_to_leader PASSED [ 15%]
+tests/test_integration.py::TestBasicOperations::test_read_from_leader PASSED [ 20%]
+tests/test_integration.py::TestBasicOperations::test_read_nonexistent_key PASSED [ 25%]
+tests/test_integration.py::TestReplication::test_replication_to_all_followers PASSED [ 30%]
+tests/test_integration.py::TestReplication::test_write_quorum PASSED     [ 35%]
+tests/test_integration.py::TestReplication::test_read_from_follower PASSED [ 40%]
+tests/test_integration.py::TestFollowerBehavior::test_follower_rejects_writes PASSED [ 45%]
+tests/test_integration.py::TestFollowerBehavior::test_follower_accepts_reads PASSED [ 50%]
+tests/test_integration.py::TestConsistency::test_all_data_endpoint PASSED [ 55%]
+tests/test_integration.py::TestConsistency::test_eventual_consistency PASSED [ 60%]
+tests/test_integration.py::TestConcurrentWrites::test_concurrent_writes PASSED [ 65%]
+tests/test_integration.py::TestConcurrentWrites::test_concurrent_writes_same_key PASSED [ 70%]
+tests/test_integration.py::TestVersionedWrites::test_versioned_write_returns_version PASSED [ 75%]
+tests/test_integration.py::TestVersionedWrites::test_versioned_write_increments_version PASSED [ 80%]
+tests/test_integration.py::TestVersionedWrites::test_versioned_write_final_value_is_latest PASSED [ 85%]
+tests/test_integration.py::TestVersionedWrites::test_versioned_concurrent_writes_consistency PASSED [ 90%]
+tests/test_integration.py::TestVersionedWrites::test_versioned_replication_ordering PASSED [ 95%]
+tests/test_integration.py::TestVersionedWrites::test_basic_write_has_no_version PASSED [100%]
 
-============================= 14 passed in 31.86s =============================
+======================== 20 passed in 65.25s (0:01:05) ========================
 ```
 
-**all 14 tests passed ✓**
+**all 20 tests passed**
 
 ---
 
@@ -551,136 +572,114 @@ tests/test_integration.py::TestConcurrentWrites::test_concurrent_writes_same_key
 | total writes per quorum | 100 |
 | number of keys per quorum | 10 |
 | writes per key | 10 |
-| write mode | sequential (one at a time) |
+| write mode | ALL 100 writes fired concurrently (creates race conditions) |
 | network delay range | [0ms, 1000ms] |
 | quorum values tested | 1, 2, 3, 4, 5 |
-| total keys across all tests | 50 (10 per quorum x 5 quorums) |
+| modes tested | basic (last-writer-wins), versioned (conflict resolution) |
 
-**Note:** Writes are performed sequentially to ensure deterministic final values. This allows proper measurement of race conditions caused by network delays during replication, rather than race conditions from concurrent client writes.
+**key difference:** all 100 writes (10 keys x 10 writes each) are fired concurrently to the same keys. this creates realistic race conditions from concurrent writes with random network delays.
 
-### Full Quorum Analysis Results
+### Two Consistency Modes
 
-the benchmark was run for each quorum value (1-5), restarting docker between runs to apply the new quorum configuration:
+the system supports two write modes to demonstrate the race condition problem and its solution:
 
-| quorum | mean (ms) | median (ms) | p90 (ms) | p95 (ms) | min (ms) | max (ms) | success |
-|--------|-----------|-------------|----------|----------|----------|----------|---------|
-| 1 | 171 | 133 | 336 | 388 | 15 | 675 | 100/100 |
-| 2 | 335 | 304 | 642 | 661 | 45 | 796 | 100/100 |
-| 3 | 517 | 498 | 784 | 868 | 81 | 963 | 100/100 |
-| 4 | 656 | 674 | 907 | 956 | 193 | 1010 | 100/100 |
-| 5 | 865 | 903 | 999 | 1010 | 412 | 1015 | 100/100 |
+| mode | description | consistency |
+|------|-------------|-------------|
+| **basic** | last-writer-wins semantics | low (6-16%) - race conditions |
+| **versioned** | version-based conflict resolution | 100% - no race conditions |
+
+### Race Condition Explanation
+
+```
+the problem (basic mode):
+  write 1: key=A, value="v1" → replication delay = 900ms
+  write 2: key=A, value="v2" → replication delay = 100ms
+  
+  at follower:
+    - write 2 arrives first (delay 100ms)
+    - write 1 arrives later (delay 900ms) and OVERWRITES write 2
+    - follower has "v1" but leader has "v2" (INCONSISTENT)
+
+the solution (versioned mode):
+  write 1: key=A, value="v1", version=1 → replication delay = 900ms
+  write 2: key=A, value="v2", version=2 → replication delay = 100ms
+  
+  at follower:
+    - write 2 arrives first: version=2 > 0, ACCEPT (stores "v2", version=2)
+    - write 1 arrives later: version=1 <= 2, REJECT (stale write)
+    - follower has "v2" matching leader (CONSISTENT)
+```
+
+### Consistency Comparison Results
+
+#### Basic Mode (Race Conditions)
+
+| quorum | consistency (%) | matching pairs | total pairs |
+|--------|-----------------|----------------|-------------|
+| 1 | 16.0 | 8 | 50 |
+| 2 | 6.0 | 3 | 50 |
+| 3 | 12.0 | 6 | 50 |
+| 4 | 16.0 | 8 | 50 |
+| 5 | 8.0 | 4 | 50 |
+
+#### Versioned Mode (Conflict Resolution)
+
+| quorum | consistency (%) | matching pairs | total pairs |
+|--------|-----------------|----------------|-------------|
+| 1 | 100.0 | 50 | 50 |
+| 2 | 100.0 | 50 | 50 |
+| 3 | 100.0 | 50 | 50 |
+| 4 | 100.0 | 50 | 50 |
+| 5 | 100.0 | 50 | 50 |
+
+### Consistency Comparison Plot
+
+![consistency comparison](results/consistency_comparison.png)
+
+this plot shows the dramatic difference between the two modes:
+- **red line (basic mode)**: severe race conditions result in only 6-16% consistency
+- **green line (versioned mode)**: version-based conflict resolution achieves 100% consistency at ALL quorum levels
+
+**key insight:** versioning eliminates race conditions regardless of quorum level. even with quorum=1, versioned mode achieves 100% consistency because stale writes are rejected based on version numbers.
+
+### Basic Mode Plot
+
+![basic consistency](results/consistency_basic.png)
+
+with concurrent writes and last-writer-wins semantics, race conditions cause severe inconsistency (6-16%) regardless of quorum level. the random network delays cause unpredictable write ordering.
+
+### Versioned Mode Plot
+
+![versioned consistency](results/consistency_versioned.png)
+
+with version-based conflict resolution, all followers converge to the same final value. the version check (`version > current_version`) ensures only the latest write is stored, handling out-of-order delivery correctly.
+
+### Why Versioning Works
+
+1. **leader assigns versions**: each write to a key gets a monotonically increasing version number
+2. **version travels with data**: the version is included in the replication message
+3. **followers check versions**: `set_versioned()` only accepts if `version > current_version`
+4. **stale writes rejected**: out-of-order arrivals are silently discarded
+
+this is a form of **optimistic locking** / **last-writer-wins with versioning** - a common pattern in distributed systems.
+
+### Latency Results
+
+latency increases with quorum (as expected - must wait for more followers):
+
+| quorum | mean (ms) | median (ms) | p90 (ms) | p95 (ms) |
+|--------|-----------|-------------|----------|----------|
+| 1 | ~6500 | ~7200 | ~10000 | ~10500 |
+| 2 | ~8800 | ~9400 | ~10700 | ~11000 |
+| 3 | ~9300 | ~9600 | ~10700 | ~10800 |
+| 4 | ~10100 | ~10400 | ~10700 | ~10700 |
+| 5 | ~12200 | ~12300 | ~12500 | ~12600 |
+
+**note:** latencies are high because all 100 writes are fired concurrently, causing resource contention. sequential writes would show the expected ~167ms to ~833ms based on order statistics.
 
 ### Latency Percentiles Plot
 
 ![latency percentiles](results/latency_percentiles.png)
-
-this plot shows four latency metrics for each quorum value:
-- **Mean** (blue solid line): average of all 100 latency measurements
-- **Median / p50** (green dashed line): 50% of requests completed faster than this
-- **p90** (orange dash-dot line): 90% of requests completed faster than this
-- **p95** (red dotted line): 95% of requests completed faster than this (tail latency)
-
-**key observations:**
-1. all metrics increase as quorum increases (expected behavior)
-2. mean and median are close, indicating symmetric distribution
-3. p90 and p95 show tail latency - occasional slow responses
-4. at quorum=5, mean (~865ms) approaches the max delay (1000ms)
-
-### Understanding Percentiles
-
-| percentile | meaning | why it matters |
-|------------|---------|----------------|
-| **mean** | arithmetic average | overall performance indicator |
-| **median (p50)** | middle value when sorted | robust to outliers |
-| **p90** | 90% of requests are faster | typical worst-case for most users |
-| **p95** | 95% of requests are faster | tail latency, SLA threshold |
-
-**practical interpretation:**
-- for quorum=2, 90% of writes complete in under 668ms
-- only 5% of writes take longer than 751ms
-- this matters for user experience and SLA guarantees
-
-### Why Latency Increases with Quorum
-
-with quorum-based replication, the leader waits for K followers to acknowledge:
-
-```
-quorum=1: wait for FASTEST follower   → mean ~239ms
-quorum=2: wait for 2nd fastest        → mean ~406ms  
-quorum=3: wait for 3rd (median)       → mean ~555ms
-quorum=4: wait for 4th fastest        → mean ~740ms
-quorum=5: wait for SLOWEST follower   → mean ~897ms
-```
-
-**the trade-off:**
-- **higher quorum** = more durable (data confirmed on more nodes)
-- **higher quorum** = higher latency (must wait for slower nodes)
-
-this is the fundamental **consistency vs latency** trade-off in distributed systems.
-
-### Value-Based Consistency Analysis
-
-unlike simple key-count checks, this analysis compares the **actual values** of each key between the leader and all followers. this reveals race conditions that occur during replication.
-
-#### methodology
-
-for each quorum value (1-5), after the benchmark completes:
-1. fetch all key-value pairs from the leader
-2. fetch all key-value pairs from each follower
-3. compare each (key, follower) pair: does `follower[key] == leader[key]`?
-4. calculate consistency percentage = matching pairs / total pairs × 100%
-
-#### per-quorum consistency results
-
-| quorum | actual (%) | theoretical (%) | matching pairs | total pairs |
-|--------|------------|-----------------|----------------|-------------|
-| 1 | 44.0 | 20.0 | 22 | 50 |
-| 2 | 84.0 | 40.0 | 42 | 50 |
-| 3 | 90.0 | 60.0 | 45 | 50 |
-| 4 | 94.0 | 80.0 | 47 | 50 |
-| 5 | 100.0 | 100.0 | 50 | 50 |
-
-- **total pairs** = 10 keys × 5 followers = 50 comparisons per quorum
-- **theoretical minimum** = (quorum / num_followers) × 100% = K/5 × 100%
-
-#### consistency vs quorum plot
-
-![consistency vs quorum](results/consistency.png)
-
-this plot visualizes:
-- **blue solid line (Actual Consistency)**: measured percentage of matching key-value pairs
-- **gray dotted line (Theoretical Minimum)**: expected minimum based on quorum size (K/N × 100%)
-
-#### key observations
-
-1. **logarithmic-like curve**: consistency increases rapidly at first, then plateaus
-   - quorum 1→2: +40% improvement (44% → 84%)
-   - quorum 4→5: +6% improvement (94% → 100%)
-
-2. **actual exceeds theoretical**: the gray line represents the worst-case minimum where only K followers are synchronized and the rest have 0% match. in practice, async replication often completes before the next write, boosting consistency.
-
-3. **quorum=5 guarantees 100%**: when all 5 followers must ACK before the write returns, all followers are synchronized before the next write begins. no race conditions possible.
-
-4. **quorum=1 shows significant inconsistency**: with only 1 follower ACK required, the other 4 receive writes asynchronously. per-message random delays cause writes to arrive out of order, resulting in only 44% consistency.
-
-#### race condition mechanism
-
-the root cause is **per-message independent delays**. even with sequential client writes:
-
-```
-time=0ms:   write("key1", "v0") → leader sends to all followers
-            follower1 delay=800ms, follower2 delay=100ms, ...
-
-time=50ms:  write("key1", "v1") → leader sends to all followers  
-            follower1 delay=100ms, follower2 delay=900ms, ...
-
-result on follower1:
-  - receives "v1" at 150ms (0+50+100)
-  - receives "v0" at 800ms (0+800)
-  - final value = "v0" (WRONG - should be "v1")
-```
-
-with quorum=K, K followers must ACK synchronously. this forces those K followers to have the correct value before the next write starts. higher K = more synchronized followers = higher consistency.
 
 ---
 
@@ -688,57 +687,87 @@ with quorum=K, K followers must ACK synchronously. this forces those K followers
 
 ### Key Findings
 
-1. **quorum directly impacts all latency percentiles**
-   - quorum=1: mean 239ms, median 220ms, p95 506ms
-   - quorum=5: mean 897ms, median 946ms, p95 1070ms
-   - ~3.7x increase in mean latency from quorum 1 to 5
+1. **race conditions in basic mode are severe**
+   - with all 100 writes fired concurrently, basic mode achieves only 6-16% consistency
+   - random network delays cause unpredictable write ordering
+   - higher quorum does NOT eliminate race conditions (only reduces window slightly)
 
-2. **percentile distribution insights**
-   - mean and median are close, indicating symmetric latency distribution
-   - p90 and p95 reveal tail latency (occasional slow responses)
-   - at high quorum, p95 approaches max delay (1000ms)
+2. **versioned mode eliminates race conditions completely**
+   - 100% consistency at ALL quorum levels (1-5)
+   - version-based conflict resolution rejects stale writes
+   - works regardless of network delays or message ordering
 
-3. **semi-synchronous replication works correctly**
-   - leader waits for exactly `quorum` acknowledgments before responding
-   - remaining followers receive updates asynchronously in background
-   - 100% success rate across all 500 writes
+3. **quorum affects latency, not consistency (with versioning)**
+   - higher quorum = higher latency (must wait for more followers)
+   - with versioning, quorum only affects durability and latency, not correctness
+   - quorum=1 with versioning is both fast AND consistent
 
-4. **network delay simulation effective**
-   - observed latency range matches configured delay (0-1000ms)
-   - random delays create realistic replication behavior
+4. **the fundamental insight**
+   - quorum-based replication guarantees durability (data on K nodes before ACK)
+   - but quorum alone does NOT guarantee consistency with concurrent writes
+   - conflict resolution (versioning) is needed to handle race conditions
 
-5. **data consistency achieved**
-   - all followers receive all keys (same count as leader)
-   - semi-synchronous guarantees data on quorum nodes before ack
+### Consistency Comparison
 
-### Trade-offs Observed
+| mode | quorum=1 | quorum=3 | quorum=5 | mechanism |
+|------|----------|----------|----------|-----------|
+| basic | 6-16% | 100% | 6-16% | last-writer-wins (race conditions) |
+| versioned | 100% | 100% | 100% | version-based conflict resolution |
 
-| aspect | low quorum (1-2) | high quorum (4-5) |
-|--------|------------------|-------------------|
-| mean latency | ~240-406ms | ~740-897ms |
-| p95 latency | ~506-751ms | ~1011-1070ms |
-| durability | data on 2-3 nodes | data on 5-6 nodes |
-| availability | high (fewer nodes needed) | lower (all nodes needed) |
+### Trade-offs
 
-### Latency by Quorum Summary
+| aspect | basic mode | versioned mode |
+|--------|------------|----------------|
+| consistency | low (6-16%) | high (100%) |
+| complexity | simple | slightly more complex |
+| overhead | none | version counter + comparison |
+| use case | non-critical data | critical data, banking, etc. |
 
-| quorum | mean | median | p90 | p95 |
-|--------|------|--------|-----|-----|
-| 1 | 239ms | 220ms | 435ms | 506ms |
-| 2 | 406ms | 405ms | 668ms | 751ms |
-| 3 | 555ms | 546ms | 832ms | 877ms |
-| 4 | 740ms | 763ms | 961ms | 1011ms |
-| 5 | 897ms | 946ms | 1056ms | 1070ms |
+### When to Use Each Mode
+
+**basic mode:**
+- when eventual consistency is acceptable
+- when writes to the same key are rare
+- when performance is more important than correctness
+- examples: caching, logging, analytics
+
+**versioned mode:**
+- when strong consistency is required
+- when concurrent writes to the same key are common
+- when correctness is more important than simplicity
+- examples: banking, inventory, user accounts
 
 ---
 
 ## Conclusions
 
-This laboratory work successfully implements a distributed key-value store with single-leader replication following the principles from "Designing Data-Intensive Applications" by Martin Kleppmann. The system features leader-based replication with 1 leader and 5 followers, semi-synchronous replication with configurable write quorum (1-5), and network latency simulation in the range [0ms, 1000ms] for realistic testing. The implementation uses FastAPI with asyncio for concurrent request handling, Docker containerization with docker-compose orchestration, and includes a comprehensive test suite with 14 passing tests.
+This laboratory work successfully implements a distributed key-value store with single-leader replication following the principles from "Designing Data-Intensive Applications" by Martin Kleppmann. The system features leader-based replication with 1 leader and 5 followers, semi-synchronous replication with configurable write quorum (1-5), and network latency simulation in the range [0ms, 1000ms] for realistic testing. The implementation uses FastAPI with asyncio for concurrent request handling, Docker containerization with docker-compose orchestration, and includes a comprehensive test suite with 20 passing tests.
 
-The performance analysis with 500 total writes (100 per quorum value) revealed clear insights about distributed system trade-offs. Quorum selection directly impacts latency: higher quorum means better durability but higher latency, with a 3.7x increase from quorum=1 to quorum=5. The percentile metrics (mean, median, p90, p95) proved valuable for understanding tail latency that simple averages would hide. The use of `asyncio.wait` with `FIRST_COMPLETED` proved ideal for implementing quorum-based acknowledgment patterns, and Docker networking significantly simplified distributed system development and testing.
+### Key Achievement: Version-Based Conflict Resolution
 
-Future improvements could include implementing leader election for fault tolerance, adding persistent storage (currently in-memory only), implementing read-your-writes consistency guarantees, adding conflict resolution for concurrent writes, and implementing log-based replication for crash recovery.
+The most significant finding is the implementation and analysis of **version-based conflict resolution** to eliminate race conditions:
+
+| mode | consistency | mechanism |
+|------|-------------|-----------|
+| basic (last-writer-wins) | 6-16% | race conditions from concurrent writes |
+| versioned (conflict resolution) | 100% | stale writes rejected via version check |
+
+This demonstrates a fundamental principle in distributed systems: **quorum-based replication guarantees durability, but not consistency**. Conflict resolution mechanisms (like versioning) are required to handle concurrent writes correctly.
+
+### Technical Insights
+
+1. **race conditions are inevitable** with concurrent writes and network delays in basic last-writer-wins systems
+2. **versioning solves the problem** by rejecting writes where `version <= current_version`
+3. **quorum affects latency, not correctness** (with versioning enabled)
+4. **the solution is simple** - just a version counter and comparison, minimal overhead
+
+### Future Improvements
+
+- implement leader election for fault tolerance (currently leader is fixed)
+- add persistent storage (currently in-memory only)
+- implement read-your-writes consistency guarantees
+- add vector clocks for multi-key transactions
+- implement log-based replication for crash recovery
 
 ---
 

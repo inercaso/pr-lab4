@@ -1,0 +1,67 @@
+[
+  {
+    "quorum": 1,
+    "total_writes": 100,
+    "successful_writes": 100,
+    "failed_writes": 0,
+    "total_time_seconds": 10.307583399990108,
+    "avg_latency_ms": 5642.1069910004735,
+    "min_latency_ms": 631.9758999743499,
+    "max_latency_ms": 10186.895999999251,
+    "median_latency_ms": 6381.421500016586,
+    "p90_latency_ms": 9110.489149985367,
+    "p95_latency_ms": 9448.767420003423
+  },
+  {
+    "quorum": 2,
+    "total_writes": 100,
+    "successful_writes": 100,
+    "failed_writes": 0,
+    "total_time_seconds": 13.56317000000854,
+    "avg_latency_ms": 10957.14545100287,
+    "min_latency_ms": 8100.872199982405,
+    "max_latency_ms": 13411.716299975524,
+    "median_latency_ms": 11181.626899997354,
+    "p90_latency_ms": 12809.283590022824,
+    "p95_latency_ms": 13222.609480010578
+  },
+  {
+    "quorum": 3,
+    "total_writes": 100,
+    "successful_writes": 100,
+    "failed_writes": 0,
+    "total_time_seconds": 10.46161420000135,
+    "avg_latency_ms": 8703.585676000803,
+    "min_latency_ms": 5089.68430000823,
+    "max_latency_ms": 10256.554099993082,
+    "median_latency_ms": 9140.885000000708,
+    "p90_latency_ms": 10083.26249998936,
+    "p95_latency_ms": 10167.110985014006
+  },
+  {
+    "quorum": 4,
+    "total_writes": 100,
+    "successful_writes": 100,
+    "failed_writes": 0,
+    "total_time_seconds": 11.784492900012992,
+    "avg_latency_ms": 10889.21563699987,
+    "min_latency_ms": 6327.939900016645,
+    "max_latency_ms": 11730.049300007522,
+    "median_latency_ms": 11234.248099994147,
+    "p90_latency_ms": 11541.999940003734,
+    "p95_latency_ms": 11571.501929996884
+  },
+  {
+    "quorum": 5,
+    "total_writes": 100,
+    "successful_writes": 100,
+    "failed_writes": 0,
+    "total_time_seconds": 11.983947699976852,
+    "avg_latency_ms": 11519.743262001139,
+    "min_latency_ms": 9760.546500008786,
+    "max_latency_ms": 11905.84530000342,
+    "median_latency_ms": 11629.118049997487,
+    "p90_latency_ms": 11808.640299999388,
+    "p95_latency_ms": 11839.154780018725
+  }
+]

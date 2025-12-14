@@ -28,7 +28,7 @@ class ReplicationResult:
 class Replicator:
     """
     handles semi-synchronous replication to followers.
-    
+
     semi-synchronous means we wait for a configurable number of
     followers (quorum) to acknowledge before returning success.
     remaining followers receive updates asynchronously.
@@ -55,7 +55,7 @@ class Replicator:
         """
         simulate network delay before sending replication request.
         delay is random in [delay_min, delay_max] milliseconds.
-        
+
         returns:
             actual delay applied in seconds
         """
@@ -65,30 +65,35 @@ class Replicator:
         return delay_sec
 
     async def _replicate_to_follower(
-        self, follower_url: str, key: str, value: Any
+        self, follower_url: str, key: str, value: Any, version: int | None = None
     ) -> ReplicationResult:
         """
         replicate a single write to one follower.
-        
+
         args:
             follower_url: base url of the follower
             key: key to replicate
             value: value to replicate
-            
+            version: optional version number for versioned writes
+
         returns:
             replicationresult indicating success or failure
         """
         try:
             # simulate network delay before sending
             delay = await self._simulate_network_delay()
-            logger.debug(
-                f"replicated to {follower_url} after {delay:.3f}s delay"
-            )
+            logger.debug(f"replicated to {follower_url} after {delay:.3f}s delay")
 
             client = await self._get_client()
+
+            # build payload - include version if provided
+            payload = {"key": key, "value": value}
+            if version is not None:
+                payload["version"] = version
+
             response = await client.post(
                 f"{follower_url}/internal/replicate",
-                json={"key": key, "value": value},
+                json=payload,
             )
 
             if response.status_code == 200:
@@ -104,20 +109,23 @@ class Replicator:
             logger.error(f"replication to {follower_url} failed: {error_msg}")
             return ReplicationResult(follower_url, success=False, error=error_msg)
 
-    async def replicate(self, key: str, value: Any) -> tuple[bool, int, list[str]]:
+    async def replicate(
+        self, key: str, value: Any, version: int | None = None
+    ) -> tuple[bool, int, list[str]]:
         """
         replicate write to all followers using semi-synchronous strategy.
-        
+
         semi-synchronous replication:
         1. send replication requests to all followers concurrently
         2. wait until quorum number of followers acknowledge
         3. return success immediately when quorum is met
         4. remaining replications continue in background
-        
+
         args:
             key: key to replicate
             value: value to replicate
-            
+            version: optional version for versioned mode
+
         returns:
             tuple of (success, ack_count, failed_followers)
             - success: true if quorum was met
@@ -133,13 +141,13 @@ class Replicator:
 
         logger.info(
             f"starting replication of {key} to {len(follower_urls)} followers, "
-            f"quorum={quorum}"
+            f"quorum={quorum}" + (f", version={version}" if version else "")
         )
 
         # create tasks for all followers
         tasks = {
             asyncio.create_task(
-                self._replicate_to_follower(url, key, value)
+                self._replicate_to_follower(url, key, value, version)
             ): url
             for url in follower_urls
         }
@@ -191,7 +199,7 @@ class Replicator:
     ) -> None:
         """
         complete remaining replication tasks in background.
-        
+
         args:
             pending: set of pending tasks
             failed_followers: list to append failures to (for logging)

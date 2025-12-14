@@ -2,12 +2,22 @@
 performance analysis for the distributed key-value store.
 measures latency vs quorum and verifies data consistency.
 
+supports two consistency modes:
+- basic: last-writer-wins with race conditions
+- versioned: version-based conflict resolution
+
 usage:
     # run with default quorum (from docker-compose)
     python -m analysis.performance
 
     # run full quorum comparison (restarts docker for each quorum)
     python -m analysis.performance --full
+
+    # run basic (race condition) analysis only
+    python -m analysis.performance --full-basic
+
+    # run versioned (no race condition) analysis only
+    python -m analysis.performance --full-versioned
 
     # just check consistency
     python -m analysis.performance --consistency-only
@@ -206,48 +216,166 @@ async def single_write(
         return False, latency_ms
 
 
-async def run_benchmark(quorum: int) -> BenchmarkResult:
+async def single_write_versioned(
+    client: httpx.AsyncClient, key: str, value: str
+) -> tuple[bool, float]:
     """
-    run benchmark with specified quorum value.
-    performs 100 writes (10 keys x 10 writes each) SEQUENTIALLY to avoid
-    race conditions from concurrent writes to the same key.
+    perform a single versioned write and measure latency.
+
+    versioned writes use the ?versioned=true query parameter to enable
+    version-based conflict resolution. the leader assigns a version number
+    and followers reject stale writes (version <= current).
+
+    returns:
+        tuple of (success, latency_ms)
+    """
+    start = time.perf_counter()
+    try:
+        response = await client.post(
+            f"{LEADER_URL}/store/{key}?versioned=true",
+            json={"value": value},
+        )
+        latency_ms = (time.perf_counter() - start) * 1000
+        return response.status_code == 200, latency_ms
+    except Exception as e:
+        latency_ms = (time.perf_counter() - start) * 1000
+        return False, latency_ms
+
+
+async def run_benchmark_basic(quorum: int) -> BenchmarkResult:
+    """
+    run benchmark with BASIC mode (last-writer-wins, race conditions).
+
+    fires all 100 writes concurrently to create natural race conditions.
+    10 keys × 10 writes each = 100 total writes, all fired simultaneously.
+
+    this demonstrates the fundamental race condition problem:
+    - multiple writes to the same key compete for resources
+    - random network delays cause unpredictable write ordering
+    - higher quorum helps but cannot eliminate race conditions
 
     uses unique key prefixes per quorum to allow per-quorum consistency checking.
     """
-    print(f"\n--- running benchmark with quorum={quorum} ---")
+    print(f"\n--- running BASIC benchmark with quorum={quorum} ---")
 
     latencies: list[float] = []
     successful = 0
     failed = 0
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # generate all write tasks - 10 keys, each written 10 times
-        tasks = []
+        total_writes = NUM_KEYS * WRITES_PER_KEY
+        print(f"  total writes: {total_writes}")
+        print(
+            f"  mode: BASIC (all {total_writes} writes concurrent, race conditions expected)"
+        )
+
+        start_time = time.perf_counter()
+
+        # fire ALL writes concurrently - creates race conditions
+        all_tasks = []
         for key_idx in range(NUM_KEYS):
             key = f"q{quorum}_k{key_idx}"
             for write_idx in range(WRITES_PER_KEY):
                 value = f"value_{write_idx}"
-                tasks.append((key, value))
+                all_tasks.append(single_write(client, key, value))
 
-        total_writes = len(tasks)
-        print(f"  total writes: {total_writes}")
-        print(f"  mode: sequential (one write at a time)")
+        # execute all writes concurrently
+        results = await asyncio.gather(*all_tasks)
 
-        start_time = time.perf_counter()
-
-        # process SEQUENTIALLY to ensure deterministic final values
-        for i, (key, value) in enumerate(tasks):
-            success, latency = await single_write(client, key, value)
+        for success, latency in results:
             latencies.append(latency)
             if success:
                 successful += 1
             else:
                 failed += 1
 
-            if (i + 1) % 20 == 0:
-                print(f"  progress: {i + 1}/{total_writes} writes")
+        print(f"  progress: {total_writes}/{total_writes} writes (all concurrent)")
 
-        print(f"  progress: {total_writes}/{total_writes} writes")
+        total_time = time.perf_counter() - start_time
+
+    avg_latency = sum(latencies) / len(latencies) if latencies else 0
+    min_latency = min(latencies) if latencies else 0
+    max_latency = max(latencies) if latencies else 0
+    median_latency = calculate_percentile(latencies, 50)
+    p90_latency = calculate_percentile(latencies, 90)
+    p95_latency = calculate_percentile(latencies, 95)
+
+    result = BenchmarkResult(
+        quorum=quorum,
+        total_writes=total_writes,
+        successful_writes=successful,
+        failed_writes=failed,
+        total_time_seconds=total_time,
+        avg_latency_ms=avg_latency,
+        min_latency_ms=min_latency,
+        max_latency_ms=max_latency,
+        median_latency_ms=median_latency,
+        p90_latency_ms=p90_latency,
+        p95_latency_ms=p95_latency,
+    )
+
+    print(f"  completed in {total_time:.2f}s")
+    print(f"  success: {successful}/{total_writes}")
+    print(f"  mean latency: {avg_latency:.2f}ms")
+    print(f"  median latency: {median_latency:.2f}ms")
+    print(f"  p90 latency: {p90_latency:.2f}ms")
+    print(f"  p95 latency: {p95_latency:.2f}ms")
+    print(f"  min latency: {min_latency:.2f}ms")
+    print(f"  max latency: {max_latency:.2f}ms")
+
+    return result
+
+
+async def run_benchmark_versioned(quorum: int) -> BenchmarkResult:
+    """
+    run benchmark with VERSIONED mode (version-based conflict resolution).
+
+    fires all 100 writes concurrently, but uses versioned writes.
+    the leader assigns incrementing version numbers, and followers reject
+    writes with version <= current version.
+
+    this demonstrates how versioning eliminates race conditions:
+    - each write has a unique version number
+    - out-of-order delivery is handled by rejecting stale writes
+    - consistency is guaranteed regardless of network delays
+
+    uses unique key prefixes per quorum to allow per-quorum consistency checking.
+    """
+    print(f"\n--- running VERSIONED benchmark with quorum={quorum} ---")
+
+    latencies: list[float] = []
+    successful = 0
+    failed = 0
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        total_writes = NUM_KEYS * WRITES_PER_KEY
+        print(f"  total writes: {total_writes}")
+        print(
+            f"  mode: VERSIONED (all {total_writes} writes concurrent, no race conditions)"
+        )
+
+        start_time = time.perf_counter()
+
+        # fire ALL writes concurrently - versioning handles ordering
+        all_tasks = []
+        for key_idx in range(NUM_KEYS):
+            key = f"q{quorum}_k{key_idx}"
+            for write_idx in range(WRITES_PER_KEY):
+                value = f"value_{write_idx}"
+                all_tasks.append(single_write_versioned(client, key, value))
+
+        # execute all writes concurrently
+        results = await asyncio.gather(*all_tasks)
+
+        for success, latency in results:
+            latencies.append(latency)
+            if success:
+                successful += 1
+            else:
+                failed += 1
+
+        print(f"  progress: {total_writes}/{total_writes} writes (all concurrent)")
+
         total_time = time.perf_counter() - start_time
 
     avg_latency = sum(latencies) / len(latencies) if latencies else 0
@@ -634,21 +762,14 @@ def calculate_theoretical_consistency(quorum: int, n: int = NUM_FOLLOWERS) -> fl
     return (quorum / n) * 100
 
 
-def plot_consistency_vs_quorum(
-    results: list[ConsistencyResult], output_path: str
-) -> None:
+def plot_consistency_basic(results: list[ConsistencyResult], output_path: str) -> None:
     """
-    generate and save a plot showing consistency percentage vs quorum.
+    generate and save a plot showing BASIC mode consistency vs quorum.
 
-    includes:
-    - solid line: actual measured consistency
-    - dotted line: theoretical minimum consistency (quorum/followers * 100%)
-
-    uses the same visual style as the latency graph.
+    basic mode shows race conditions from concurrent writes with last-writer-wins.
     """
     quorums = [r.quorum for r in results]
     actual_consistency = [r.consistency_percentage for r in results]
-    theoretical_consistency = [calculate_theoretical_consistency(q) for q in quorums]
 
     plt.figure(figsize=(10, 6))
 
@@ -656,42 +777,29 @@ def plot_consistency_vs_quorum(
     plt.plot(
         quorums,
         actual_consistency,
-        color="#2196F3",
+        color="#F44336",  # red for basic (race conditions)
         linestyle="-",
         linewidth=2,
         marker="o",
         markersize=8,
-        label="Actual Consistency",
-    )
-
-    # plot theoretical minimum (dotted line)
-    plt.plot(
-        quorums,
-        theoretical_consistency,
-        color="#9E9E9E",
-        linestyle=":",
-        linewidth=2,
-        marker="",
-        label="Theoretical Minimum (K/N)",
+        label="Consistency (Basic Mode)",
     )
 
     plt.xlabel("Write Quorum", fontsize=12)
     plt.ylabel("Consistency (%)", fontsize=12)
     plt.title(
-        "Data Consistency vs Quorum\n"
-        f"(measuring race conditions, network delay: [{DELAY_MIN}ms, {DELAY_MAX}ms])",
+        "Data Consistency vs Quorum - BASIC MODE\n"
+        f"(last-writer-wins, {NUM_KEYS * WRITES_PER_KEY} concurrent writes, "
+        f"network delay: [{DELAY_MIN}ms, {DELAY_MAX}ms])",
         fontsize=14,
     )
     plt.xticks(quorums)
-    plt.ylim(0, 105)  # 0-100% with some padding
-    plt.legend(loc="lower right", fontsize=10)
+    plt.ylim(0, 105)
+    plt.legend(loc="upper right", fontsize=10)
     plt.grid(True, alpha=0.3)
 
     # add value annotations
-    for q, actual, theoretical in zip(
-        quorums, actual_consistency, theoretical_consistency
-    ):
-        # annotate actual values
+    for q, actual in zip(quorums, actual_consistency):
         plt.annotate(
             f"{actual:.1f}%",
             (q, actual),
@@ -699,18 +807,149 @@ def plot_consistency_vs_quorum(
             xytext=(0, 10),
             ha="center",
             fontsize=9,
-            color="#2196F3",
+            color="#F44336",
         )
-        # annotate theoretical values (only at first and last point)
-        if q == min(quorums) or q == max(quorums):
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    print(f"  saved: {output_path}")
+
+
+def plot_consistency_versioned(
+    results: list[ConsistencyResult], output_path: str
+) -> None:
+    """
+    generate and save a plot showing VERSIONED mode consistency vs quorum.
+
+    versioned mode uses version-based conflict resolution to eliminate race conditions.
+    """
+    quorums = [r.quorum for r in results]
+    actual_consistency = [r.consistency_percentage for r in results]
+
+    plt.figure(figsize=(10, 6))
+
+    # plot actual consistency (solid line with markers)
+    plt.plot(
+        quorums,
+        actual_consistency,
+        color="#4CAF50",  # green for versioned (no race conditions)
+        linestyle="-",
+        linewidth=2,
+        marker="o",
+        markersize=8,
+        label="Consistency (Versioned Mode)",
+    )
+
+    plt.xlabel("Write Quorum", fontsize=12)
+    plt.ylabel("Consistency (%)", fontsize=12)
+    plt.title(
+        "Data Consistency vs Quorum - VERSIONED MODE\n"
+        f"(version-based conflict resolution, {NUM_KEYS * WRITES_PER_KEY} concurrent writes, "
+        f"network delay: [{DELAY_MIN}ms, {DELAY_MAX}ms])",
+        fontsize=14,
+    )
+    plt.xticks(quorums)
+    plt.ylim(0, 105)
+    plt.legend(loc="lower right", fontsize=10)
+    plt.grid(True, alpha=0.3)
+
+    # add value annotations
+    for q, actual in zip(quorums, actual_consistency):
+        plt.annotate(
+            f"{actual:.1f}%",
+            (q, actual),
+            textcoords="offset points",
+            xytext=(0, 10),
+            ha="center",
+            fontsize=9,
+            color="#4CAF50",
+        )
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    print(f"  saved: {output_path}")
+
+
+def plot_consistency_comparison(
+    basic_results: list[ConsistencyResult],
+    versioned_results: list[ConsistencyResult],
+    output_path: str,
+) -> None:
+    """
+    generate and save a comparison plot showing both modes on the same chart.
+
+    compares:
+    - red line: basic mode (race conditions)
+    - green line: versioned mode (no race conditions)
+    """
+    quorums = [r.quorum for r in basic_results]
+    basic_consistency = [r.consistency_percentage for r in basic_results]
+    versioned_consistency = [r.consistency_percentage for r in versioned_results]
+
+    plt.figure(figsize=(10, 6))
+
+    # plot basic consistency (red)
+    plt.plot(
+        quorums,
+        basic_consistency,
+        color="#F44336",
+        linestyle="-",
+        linewidth=2,
+        marker="o",
+        markersize=8,
+        label="Basic (Last-Writer-Wins)",
+    )
+
+    # plot versioned consistency (green)
+    plt.plot(
+        quorums,
+        versioned_consistency,
+        color="#4CAF50",
+        linestyle="-",
+        linewidth=2,
+        marker="s",
+        markersize=8,
+        label="Versioned (Conflict Resolution)",
+    )
+
+    plt.xlabel("Write Quorum", fontsize=12)
+    plt.ylabel("Consistency (%)", fontsize=12)
+    plt.title(
+        "Data Consistency Comparison: Basic vs Versioned\n"
+        f"({NUM_KEYS * WRITES_PER_KEY} concurrent writes, "
+        f"network delay: [{DELAY_MIN}ms, {DELAY_MAX}ms])",
+        fontsize=14,
+    )
+    plt.xticks(quorums)
+    plt.ylim(0, 105)
+    plt.legend(loc="center right", fontsize=10)
+    plt.grid(True, alpha=0.3)
+
+    # add value annotations for basic
+    for q, basic, versioned in zip(quorums, basic_consistency, versioned_consistency):
+        plt.annotate(
+            f"{basic:.0f}%",
+            (q, basic),
+            textcoords="offset points",
+            xytext=(0, -15),
+            ha="center",
+            fontsize=9,
+            color="#F44336",
+        )
+        # only annotate versioned if different from basic
+        if abs(versioned - basic) > 5:
             plt.annotate(
-                f"{theoretical:.0f}%",
-                (q, theoretical),
+                f"{versioned:.0f}%",
+                (q, versioned),
                 textcoords="offset points",
-                xytext=(0, -15),
+                xytext=(0, 10),
                 ha="center",
                 fontsize=9,
-                color="#9E9E9E",
+                color="#4CAF50",
             )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -785,42 +1024,29 @@ def generate_report(
 
     # race condition consistency results (per quorum)
     if consistency_results:
-        lines.append("RACE CONDITION CONSISTENCY BY QUORUM:")
+        lines.append("CONSISTENCY BY QUORUM:")
         lines.append("-" * 80)
         lines.append(
-            f"{'quorum':<8}{'actual (%)':<14}{'theoretical (%)':<18}{'matching':<15}{'total':<10}"
+            f"{'quorum':<8}{'consistency (%)':<18}{'matching':<15}{'total':<10}"
         )
         lines.append("-" * 80)
 
         for cr in sorted(consistency_results, key=lambda x: x.quorum):
-            theoretical = calculate_theoretical_consistency(cr.quorum)
             lines.append(
-                f"{cr.quorum:<8}{cr.consistency_percentage:<14.1f}{theoretical:<18.1f}"
+                f"{cr.quorum:<8}{cr.consistency_percentage:<18.1f}"
                 f"{cr.matching_values:<15}{cr.total_comparisons:<10}"
             )
 
         lines.append("-" * 80)
         lines.append("")
 
-        lines.append("RACE CONDITION EXPLANATION:")
+        lines.append("CONSISTENCY EXPLANATION:")
         lines.append("-" * 80)
         lines.append(
             "  consistency = % of (key, follower) pairs where values match leader."
         )
         lines.append(
-            "  race conditions from concurrent writes + network delays cause mismatches:"
-        )
-        lines.append("")
-        lines.append("  - with quorum=K, K followers ACK before leader responds")
-        lines.append("  - but per-message delays cause writes to arrive out of order")
-        lines.append("  - earlier writes with longer delays can overwrite later writes")
-        lines.append(
-            "  - higher quorum = more synchronized followers = higher consistency"
-        )
-        lines.append("")
-        lines.append("  theoretical = (quorum / num_followers) * 100%")
-        lines.append(
-            "  (assumes K followers are fully consistent, others have 0% match)"
+            "  race conditions from concurrent writes + network delays cause mismatches."
         )
         lines.append("")
 
@@ -870,7 +1096,7 @@ async def run_single_benchmark():
         print(f"leader: {health['node']}")
 
     # run benchmark (assume quorum=2 as default)
-    result = await run_benchmark(quorum=2)
+    result = await run_benchmark_basic(quorum=2)
 
     # wait for async replication to complete
     print("\nwaiting for replication to complete...")
@@ -891,25 +1117,16 @@ async def run_single_benchmark():
     print(f"report saved to: results/report.txt")
 
 
-async def run_full_quorum_analysis():
+async def run_quorum_analysis_basic():
     """
-    run complete quorum comparison (1-5).
+    run BASIC mode quorum analysis (1-5) - demonstrates race conditions.
 
-    this function:
-    1. iterates through quorum values 1-5
-    2. for each quorum:
-       - writes .env file with new quorum
-       - restarts docker-compose
-       - waits for services
-       - runs benchmark (100 writes with unique keys)
-       - waits for replication and checks race condition consistency
-    3. after all benchmarks:
-       - checks eventual consistency once
-       - generates latency and consistency plots
-       - saves report
+    uses last-writer-wins semantics with all writes fired concurrently.
+    shows how race conditions affect consistency at different quorum levels.
     """
     print("=" * 60)
-    print("FULL QUORUM ANALYSIS (1-5)")
+    print("BASIC MODE QUORUM ANALYSIS (1-5)")
+    print("(last-writer-wins, race conditions expected)")
     print("=" * 60)
 
     results: list[BenchmarkResult] = []
@@ -919,7 +1136,7 @@ async def run_full_quorum_analysis():
 
     for quorum in range(1, 6):
         print(f"\n{'=' * 40}")
-        print(f"TESTING QUORUM = {quorum}")
+        print(f"TESTING QUORUM = {quorum} (BASIC)")
         print(f"{'=' * 40}")
 
         # restart docker with new quorum
@@ -932,72 +1149,199 @@ async def run_full_quorum_analysis():
             print(f"services not ready for quorum={quorum}")
             continue
 
-        # run benchmark
-        result = await run_benchmark(quorum)
+        # run BASIC benchmark
+        result = await run_benchmark_basic(quorum)
         results.append(result)
 
         # save intermediate benchmark result
-        with open(results_dir / f"quorum_{quorum}.json", "w") as f:
+        with open(results_dir / f"basic_quorum_{quorum}.json", "w") as f:
             json.dump(asdict(result), f, indent=2)
 
-        # wait for replication to complete, then check for race conditions
+        # wait for replication to complete
         print("\n  waiting for replication to settle...")
         await asyncio.sleep(6)
 
-        # check race condition consistency for this quorum's keys
+        # check race condition consistency
         consistency_result = await check_race_condition_consistency(quorum)
         consistency_results.append(consistency_result)
 
         # save intermediate consistency result
-        with open(results_dir / f"consistency_{quorum}.json", "w") as f:
+        with open(results_dir / f"basic_consistency_{quorum}.json", "w") as f:
             json.dump(asdict(consistency_result), f, indent=2)
 
     if not results:
         print("no results collected")
-        return
+        return None, None
 
-    # wait for final replication to complete
+    # check eventual consistency
     print("\n" + "=" * 60)
-    print("FINAL CONSISTENCY CHECK")
+    print("FINAL CONSISTENCY CHECK (BASIC)")
     print("=" * 60)
-    print("\nwaiting for async replication to complete...")
     await asyncio.sleep(5)
-
-    # check eventual consistency ONCE at the end (not per quorum)
     consistency = await check_consistency()
 
-    # generate the combined latency plot
-    print("\n--- generating plots ---")
+    # generate plots
+    print("\n--- generating BASIC plots ---")
     plot_latency_percentiles(results, str(results_dir / "latency_percentiles.png"))
-
-    # generate the consistency vs quorum plot
     if consistency_results:
-        plot_consistency_vs_quorum(
-            consistency_results, str(results_dir / "consistency.png")
+        plot_consistency_basic(
+            consistency_results, str(results_dir / "consistency_basic.png")
         )
 
-    # generate final report
+    # generate report
     report = generate_report(results, consistency, consistency_results)
     print("\n" + report)
 
     # save results
-    (results_dir / "full_report.txt").write_text(report)
-    with open(results_dir / "all_results.json", "w") as f:
+    (results_dir / "basic_report.txt").write_text(report)
+    with open(results_dir / "basic_results.json", "w") as f:
         json.dump([asdict(r) for r in results], f, indent=2)
-    with open(results_dir / "consistency_results.json", "w") as f:
+    with open(results_dir / "basic_consistency_results.json", "w") as f:
         json.dump([asdict(r) for r in consistency_results], f, indent=2)
 
     print("\n" + "=" * 60)
-    print("ANALYSIS COMPLETE!")
+    print("BASIC ANALYSIS COMPLETE!")
+    print("=" * 60)
+
+    return results, consistency_results
+
+
+async def run_quorum_analysis_versioned():
+    """
+    run VERSIONED mode quorum analysis (1-5) - demonstrates conflict resolution.
+
+    uses version-based conflict resolution where stale writes are rejected.
+    shows how versioning eliminates race conditions regardless of quorum.
+    """
+    print("=" * 60)
+    print("VERSIONED MODE QUORUM ANALYSIS (1-5)")
+    print("(version-based conflict resolution)")
+    print("=" * 60)
+
+    results: list[BenchmarkResult] = []
+    consistency_results: list[ConsistencyResult] = []
+    results_dir = Path("results")
+    results_dir.mkdir(exist_ok=True)
+
+    for quorum in range(1, 6):
+        print(f"\n{'=' * 40}")
+        print(f"TESTING QUORUM = {quorum} (VERSIONED)")
+        print(f"{'=' * 40}")
+
+        # restart docker with new quorum
+        if not restart_docker(quorum):
+            print(f"failed to restart docker for quorum={quorum}")
+            continue
+
+        # wait for services
+        if not await wait_for_services(timeout=60):
+            print(f"services not ready for quorum={quorum}")
+            continue
+
+        # run VERSIONED benchmark
+        result = await run_benchmark_versioned(quorum)
+        results.append(result)
+
+        # save intermediate benchmark result
+        with open(results_dir / f"versioned_quorum_{quorum}.json", "w") as f:
+            json.dump(asdict(result), f, indent=2)
+
+        # wait for replication to complete
+        print("\n  waiting for replication to settle...")
+        await asyncio.sleep(6)
+
+        # check race condition consistency
+        consistency_result = await check_race_condition_consistency(quorum)
+        consistency_results.append(consistency_result)
+
+        # save intermediate consistency result
+        with open(results_dir / f"versioned_consistency_{quorum}.json", "w") as f:
+            json.dump(asdict(consistency_result), f, indent=2)
+
+    if not results:
+        print("no results collected")
+        return None, None
+
+    # check eventual consistency
+    print("\n" + "=" * 60)
+    print("FINAL CONSISTENCY CHECK (VERSIONED)")
+    print("=" * 60)
+    await asyncio.sleep(5)
+    consistency = await check_consistency()
+
+    # generate plots
+    print("\n--- generating VERSIONED plots ---")
+    plot_latency_percentiles(results, str(results_dir / "latency_percentiles.png"))
+    if consistency_results:
+        plot_consistency_versioned(
+            consistency_results, str(results_dir / "consistency_versioned.png")
+        )
+
+    # generate report
+    report = generate_report(results, consistency, consistency_results)
+    print("\n" + report)
+
+    # save results
+    (results_dir / "versioned_report.txt").write_text(report)
+    with open(results_dir / "versioned_results.json", "w") as f:
+        json.dump([asdict(r) for r in results], f, indent=2)
+    with open(results_dir / "versioned_consistency_results.json", "w") as f:
+        json.dump([asdict(r) for r in consistency_results], f, indent=2)
+
+    print("\n" + "=" * 60)
+    print("VERSIONED ANALYSIS COMPLETE!")
+    print("=" * 60)
+
+    return results, consistency_results
+
+
+async def run_full_quorum_analysis():
+    """
+    run complete quorum comparison (1-5) for BOTH basic and versioned modes.
+
+    this function:
+    1. runs basic mode analysis (race conditions)
+    2. runs versioned mode analysis (conflict resolution)
+    3. generates comparison plot showing both modes
+    """
+    print("=" * 60)
+    print("FULL QUORUM ANALYSIS - BASIC + VERSIONED")
+    print("=" * 60)
+
+    results_dir = Path("results")
+    results_dir.mkdir(exist_ok=True)
+
+    # run basic analysis
+    print("\n" + "#" * 60)
+    print("# PHASE 1: BASIC MODE")
+    print("#" * 60)
+    basic_results, basic_consistency = await run_quorum_analysis_basic()
+
+    # run versioned analysis
+    print("\n" + "#" * 60)
+    print("# PHASE 2: VERSIONED MODE")
+    print("#" * 60)
+    versioned_results, versioned_consistency = await run_quorum_analysis_versioned()
+
+    # generate comparison plot
+    if basic_consistency and versioned_consistency:
+        print("\n--- generating COMPARISON plot ---")
+        plot_consistency_comparison(
+            basic_consistency,
+            versioned_consistency,
+            str(results_dir / "consistency_comparison.png"),
+        )
+
+    print("\n" + "=" * 60)
+    print("FULL ANALYSIS COMPLETE!")
     print("=" * 60)
     print("\nfiles saved in results/ directory:")
-    print("  - latency_percentiles.png  (mean, median, p90, p95 plot)")
-    print("  - consistency.png          (consistency vs quorum plot)")
-    print("  - full_report.txt          (text report)")
-    print("  - all_results.json         (raw benchmark data)")
-    print("  - consistency_results.json (raw consistency data)")
-    print("  - quorum_*.json            (per-quorum benchmark results)")
-    print("  - consistency_*.json       (per-quorum consistency results)")
+    print("  - consistency_basic.png      (basic mode - race conditions)")
+    print("  - consistency_versioned.png  (versioned mode - no race conditions)")
+    print("  - consistency_comparison.png (side-by-side comparison)")
+    print("  - latency_percentiles.png    (latency metrics)")
+    print("  - basic_report.txt           (basic mode report)")
+    print("  - versioned_report.txt       (versioned mode report)")
 
 
 async def run_consistency_check():
@@ -1030,7 +1374,17 @@ def main():
     parser.add_argument(
         "--full",
         action="store_true",
-        help="run full quorum comparison (1-5), restarts docker",
+        help="run full analysis (both basic and versioned modes)",
+    )
+    parser.add_argument(
+        "--full-basic",
+        action="store_true",
+        help="run basic mode analysis only (race conditions)",
+    )
+    parser.add_argument(
+        "--full-versioned",
+        action="store_true",
+        help="run versioned mode analysis only (conflict resolution)",
     )
     parser.add_argument(
         "--consistency-only",
@@ -1042,6 +1396,10 @@ def main():
 
     if args.consistency_only:
         asyncio.run(run_consistency_check())
+    elif args.full_basic:
+        asyncio.run(run_quorum_analysis_basic())
+    elif args.full_versioned:
+        asyncio.run(run_quorum_analysis_versioned())
     elif args.full:
         asyncio.run(run_full_quorum_analysis())
     else:

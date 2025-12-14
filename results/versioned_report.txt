@@ -15,11 +15,11 @@ LATENCY RESULTS BY QUORUM:
 --------------------------------------------------------------------------------
 quorum  mean (ms)   median (ms)   p90 (ms)    p95 (ms)    success   
 --------------------------------------------------------------------------------
-1       260.65      238.05        459.19      519.34      100/100
-2       407.47      403.33        625.25      712.57      100/100
-3       574.00      560.91        835.20      873.31      100/100
-4       790.58      828.91        991.56      1028.31     100/100
-5       893.91      926.96        1054.68     1066.85     100/100
+1       5642.11     6381.42       9110.49     9448.77     100/100
+2       10957.15    11181.63      12809.28    13222.61    100/100
+3       8703.59     9140.89       10083.26    10167.11    100/100
+4       10889.22    11234.25      11542.00    11571.50    100/100
+5       11519.74    11629.12      11808.64    11839.15    100/100
 --------------------------------------------------------------------------------
 
 PERCENTILE EXPLANATION:
@@ -45,29 +45,21 @@ WHY LATENCY INCREASES WITH QUORUM:
   - higher quorum = more durable (data on more nodes)
   - higher quorum = higher latency (wait for slower nodes)
 
-RACE CONDITION CONSISTENCY BY QUORUM:
+CONSISTENCY BY QUORUM:
 --------------------------------------------------------------------------------
-quorum  actual (%)    theoretical (%)   matching       total     
+quorum  consistency (%)   matching       total     
 --------------------------------------------------------------------------------
-1       92.0          20.0              46             50        
-2       80.0          40.0              40             50        
-3       100.0         60.0              50             50        
-4       100.0         80.0              50             50        
-5       100.0         100.0             50             50        
+1       100.0             50             50        
+2       100.0             50             50        
+3       100.0             50             50        
+4       100.0             50             50        
+5       100.0             50             50        
 --------------------------------------------------------------------------------
 
-RACE CONDITION EXPLANATION:
+CONSISTENCY EXPLANATION:
 --------------------------------------------------------------------------------
   consistency = % of (key, follower) pairs where values match leader.
-  race conditions from concurrent writes + network delays cause mismatches:
-
-  - with quorum=K, K followers ACK before leader responds
-  - but per-message delays cause writes to arrive out of order
-  - earlier writes with longer delays can overwrite later writes
-  - higher quorum = more synchronized followers = higher consistency
-
-  theoretical = (quorum / num_followers) * 100%
-  (assumes K followers are fully consistent, others have 0% match)
+  race conditions from concurrent writes + network delays cause mismatches.
 
 EVENTUAL CONSISTENCY (FINAL STATE):
 --------------------------------------------------------------------------------

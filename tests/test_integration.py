@@ -214,12 +214,13 @@ class TestConsistency:
         # verify all followers have same data
         for name, url in FOLLOWER_URLS.items():
             follower_data = client.get(f"{url}/store").json()["data"]
-            
+
             # check all keys we wrote
             for key in keys:
                 assert key in follower_data, f"{name} missing key {key}"
-                assert follower_data[key] == leader_data[key], \
+                assert follower_data[key] == leader_data[key], (
                     f"{name} has wrong value for {key}"
+                )
 
 
 class TestConcurrentWrites:
@@ -270,6 +271,158 @@ class TestConcurrentWrites:
         response = await async_client.get(f"{LEADER_URL}/store/{key}")
         data = response.json()
         assert data["found"] is True
+
+
+class TestVersionedWrites:
+    """test versioned write operations with conflict resolution."""
+
+    def test_versioned_write_returns_version(self, client):
+        """test that versioned writes return a version number."""
+        key = f"versioned_test_{int(time.time())}"
+        value = "test_value"
+
+        response = client.post(
+            f"{LEADER_URL}/store/{key}?versioned=true",
+            json={"value": value},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["version"] is not None
+        assert data["version"] >= 1
+
+    def test_versioned_write_increments_version(self, client):
+        """test that sequential versioned writes increment version."""
+        key = f"version_inc_{int(time.time())}"
+
+        # first write
+        response1 = client.post(
+            f"{LEADER_URL}/store/{key}?versioned=true",
+            json={"value": "value1"},
+        )
+        version1 = response1.json()["version"]
+
+        # second write
+        response2 = client.post(
+            f"{LEADER_URL}/store/{key}?versioned=true",
+            json={"value": "value2"},
+        )
+        version2 = response2.json()["version"]
+
+        # third write
+        response3 = client.post(
+            f"{LEADER_URL}/store/{key}?versioned=true",
+            json={"value": "value3"},
+        )
+        version3 = response3.json()["version"]
+
+        assert version2 == version1 + 1
+        assert version3 == version2 + 1
+
+    def test_versioned_write_final_value_is_latest(self, client):
+        """test that the final value matches the highest version."""
+        key = f"version_final_{int(time.time())}"
+
+        # write multiple times
+        for i in range(5):
+            client.post(
+                f"{LEADER_URL}/store/{key}?versioned=true",
+                json={"value": f"value_{i}"},
+            )
+
+        # read final value
+        response = client.get(f"{LEADER_URL}/store/{key}")
+        data = response.json()
+
+        assert data["found"] is True
+        assert data["value"] == "value_4"  # last value written
+
+    @pytest.mark.asyncio
+    async def test_versioned_concurrent_writes_consistency(self, async_client):
+        """test that concurrent versioned writes maintain consistency across all nodes."""
+        key = f"versioned_concurrent_{int(time.time())}"
+        num_writes = 10
+
+        async def write_versioned(i: int):
+            response = await async_client.post(
+                f"{LEADER_URL}/store/{key}?versioned=true",
+                json={"value": f"value_{i}"},
+            )
+            return response.json()
+
+        # perform concurrent versioned writes
+        results = await asyncio.gather(*[write_versioned(i) for i in range(num_writes)])
+
+        # all writes should succeed
+        assert all(r["success"] for r in results)
+
+        # all writes should have different versions
+        versions = [r["version"] for r in results]
+        assert len(set(versions)) == num_writes  # all unique
+
+        # wait for replication
+        await asyncio.sleep(3)
+
+        # get final value from leader
+        leader_response = await async_client.get(f"{LEADER_URL}/store/{key}")
+        leader_value = leader_response.json()["value"]
+
+        # verify all followers have the same value
+        for name, url in FOLLOWER_URLS.items():
+            follower_response = await async_client.get(f"{url}/store/{key}")
+            follower_data = follower_response.json()
+            assert follower_data["found"] is True, f"{name} should have the key"
+            assert follower_data["value"] == leader_value, (
+                f"{name} has {follower_data['value']} but leader has {leader_value}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_versioned_replication_ordering(self, async_client):
+        """test that versioned replication handles out-of-order delivery correctly."""
+        key = f"version_order_{int(time.time())}"
+
+        # write multiple times sequentially (to ensure version ordering)
+        versions = []
+        for i in range(5):
+            response = await async_client.post(
+                f"{LEADER_URL}/store/{key}?versioned=true",
+                json={"value": f"ordered_value_{i}"},
+            )
+            data = response.json()
+            versions.append(data["version"])
+
+        # versions should be strictly increasing
+        for i in range(1, len(versions)):
+            assert versions[i] > versions[i - 1]
+
+        # wait for replication
+        await asyncio.sleep(3)
+
+        # final value should be the last one written
+        leader_response = await async_client.get(f"{LEADER_URL}/store/{key}")
+        assert leader_response.json()["value"] == "ordered_value_4"
+
+        # all followers should have the same final value
+        for name, url in FOLLOWER_URLS.items():
+            follower_response = await async_client.get(f"{url}/store/{key}")
+            assert follower_response.json()["value"] == "ordered_value_4", (
+                f"{name} should have final value"
+            )
+
+    def test_basic_write_has_no_version(self, client):
+        """test that non-versioned writes don't return version."""
+        key = f"basic_write_{int(time.time())}"
+
+        response = client.post(
+            f"{LEADER_URL}/store/{key}",
+            json={"value": "basic_value"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["version"] is None
 
 
 def run_basic_test():

@@ -1,0 +1,13 @@
+{
+  "quorum": 2,
+  "total_writes": 100,
+  "successful_writes": 100,
+  "failed_writes": 0,
+  "total_time_seconds": 13.56317000000854,
+  "avg_latency_ms": 10957.14545100287,
+  "min_latency_ms": 8100.872199982405,
+  "max_latency_ms": 13411.716299975524,
+  "median_latency_ms": 11181.626899997354,
+  "p90_latency_ms": 12809.283590022824,
+  "p95_latency_ms": 13222.609480010578
+}

@@ -3,12 +3,12 @@
     "quorum": 1,
     "total_keys": 10,
     "total_comparisons": 50,
-    "matching_values": 46,
-    "consistency_percentage": 92.0,
+    "matching_values": 50,
+    "consistency_percentage": 100.0,
     "per_follower_consistency": {
       "follower1": 100.0,
-      "follower2": 80.0,
-      "follower3": 80.0,
+      "follower2": 100.0,
+      "follower3": 100.0,
       "follower4": 100.0,
       "follower5": 100.0
     }
@@ -17,13 +17,13 @@
     "quorum": 2,
     "total_keys": 10,
     "total_comparisons": 50,
-    "matching_values": 40,
-    "consistency_percentage": 80.0,
+    "matching_values": 50,
+    "consistency_percentage": 100.0,
     "per_follower_consistency": {
-      "follower1": 70.0,
-      "follower2": 70.0,
-      "follower3": 80.0,
-      "follower4": 80.0,
+      "follower1": 100.0,
+      "follower2": 100.0,
+      "follower3": 100.0,
+      "follower4": 100.0,
       "follower5": 100.0
     }
   },

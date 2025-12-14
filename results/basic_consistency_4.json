@@ -1,0 +1,14 @@
+{
+  "quorum": 4,
+  "total_keys": 10,
+  "total_comparisons": 50,
+  "matching_values": 8,
+  "consistency_percentage": 16.0,
+  "per_follower_consistency": {
+    "follower1": 10.0,
+    "follower2": 10.0,
+    "follower3": 20.0,
+    "follower4": 20.0,
+    "follower5": 20.0
+  }
+}

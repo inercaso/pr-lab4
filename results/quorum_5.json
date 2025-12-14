@@ -3,11 +3,11 @@
   "total_writes": 100,
   "successful_writes": 100,
   "failed_writes": 0,
-  "total_time_seconds": 86.513189099991,
-  "avg_latency_ms": 865.1229440004681,
-  "min_latency_ms": 412.45130001334473,
-  "max_latency_ms": 1014.5779000013135,
-  "median_latency_ms": 902.8807499998948,
-  "p90_latency_ms": 999.0745200018864,
-  "p95_latency_ms": 1009.6432250065845
+  "total_time_seconds": 10.795485299982829,
+  "avg_latency_ms": 893.9098370011197,
+  "min_latency_ms": 478.0802000022959,
+  "max_latency_ms": 1110.1103000110015,
+  "median_latency_ms": 926.9626499881269,
+  "p90_latency_ms": 1054.6768100059126,
+  "p95_latency_ms": 1066.8473299927427
 }

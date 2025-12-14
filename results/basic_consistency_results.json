@@ -1,0 +1,72 @@
+[
+  {
+    "quorum": 1,
+    "total_keys": 10,
+    "total_comparisons": 50,
+    "matching_values": 8,
+    "consistency_percentage": 16.0,
+    "per_follower_consistency": {
+      "follower1": 30.0,
+      "follower2": 10.0,
+      "follower3": 0.0,
+      "follower4": 30.0,
+      "follower5": 10.0
+    }
+  },
+  {
+    "quorum": 2,
+    "total_keys": 10,
+    "total_comparisons": 50,
+    "matching_values": 3,
+    "consistency_percentage": 6.0,
+    "per_follower_consistency": {
+      "follower1": 0.0,
+      "follower2": 0.0,
+      "follower3": 0.0,
+      "follower4": 10.0,
+      "follower5": 20.0
+    }
+  },
+  {
+    "quorum": 3,
+    "total_keys": 10,
+    "total_comparisons": 50,
+    "matching_values": 6,
+    "consistency_percentage": 12.0,
+    "per_follower_consistency": {
+      "follower1": 10.0,
+      "follower2": 20.0,
+      "follower3": 10.0,
+      "follower4": 10.0,
+      "follower5": 10.0
+    }
+  },
+  {
+    "quorum": 4,
+    "total_keys": 10,
+    "total_comparisons": 50,
+    "matching_values": 8,
+    "consistency_percentage": 16.0,
+    "per_follower_consistency": {
+      "follower1": 10.0,
+      "follower2": 10.0,
+      "follower3": 20.0,
+      "follower4": 20.0,
+      "follower5": 20.0
+    }
+  },
+  {
+    "quorum": 5,
+    "total_keys": 10,
+    "total_comparisons": 50,
+    "matching_values": 4,
+    "consistency_percentage": 8.0,
+    "per_follower_consistency": {
+      "follower1": 20.0,
+      "follower2": 10.0,
+      "follower3": 10.0,
+      "follower4": 0.0,
+      "follower5": 0.0
+    }
+  }
+]

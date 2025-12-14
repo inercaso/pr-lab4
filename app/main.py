@@ -1,13 +1,15 @@
 """
 main fastapi application for the distributed key-value store.
 provides rest api endpoints for leader and follower nodes.
+supports both basic (last-writer-wins) and versioned write modes.
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Query, status
 from pydantic import BaseModel
 
 from app.config import get_settings
@@ -22,28 +24,46 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# per-key version counters (leader only)
+_version_counters: dict[str, int] = {}
+_version_lock = asyncio.Lock()
+
+
+async def get_next_version(key: str) -> int:
+    """get next version number for a key (leader only)."""
+    async with _version_lock:
+        _version_counters[key] = _version_counters.get(key, 0) + 1
+        return _version_counters[key]
+
+
 # request/response models
 class WriteRequest(BaseModel):
     """request body for write operations."""
+
     value: Any
 
 
 class ReplicateRequest(BaseModel):
     """request body for internal replication."""
+
     key: str
     value: Any
+    version: int | None = None  # optional version for versioned mode
 
 
 class WriteResponse(BaseModel):
     """response for write operations."""
+
     success: bool
     key: str
     quorum_acks: int
     message: str
+    version: int | None = None  # included in versioned mode
 
 
 class ReadResponse(BaseModel):
     """response for read operations."""
+
     key: str
     value: Any | None
     found: bool
@@ -51,6 +71,7 @@ class ReadResponse(BaseModel):
 
 class StoreResponse(BaseModel):
     """response containing all store data."""
+
     node: str
     data: dict[str, Any]
     size: int
@@ -58,6 +79,7 @@ class StoreResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     """health check response."""
+
     status: str
     node: str
     role: str
@@ -103,12 +125,21 @@ async def health_check() -> HealthResponse:
 
 
 @app.post("/store/{key}", response_model=WriteResponse)
-async def write_key(key: str, request: WriteRequest) -> WriteResponse:
+async def write_key(
+    key: str,
+    request: WriteRequest,
+    versioned: bool = Query(default=False, description="use versioned writes"),
+) -> WriteResponse:
     """
     write a value to the store.
-    
+
     on the leader: writes locally and replicates to followers.
     on followers: rejected (writes must go to leader).
+
+    args:
+        key: the key to write
+        request: the write request containing the value
+        versioned: if true, use version-based conflict resolution
     """
     settings = get_settings()
 
@@ -118,13 +149,21 @@ async def write_key(key: str, request: WriteRequest) -> WriteResponse:
             detail="writes are only accepted on the leader node",
         )
 
-    logger.info(f"received write request: {key} = {request.value}")
-
-    # write to local store first
-    await store.set(key, request.value)
+    version = None
+    if versioned:
+        version = await get_next_version(key)
+        logger.info(f"received versioned write: {key} = {request.value} (v{version})")
+        # versioned write to local store
+        await store.set_versioned(key, request.value, version)
+    else:
+        logger.info(f"received write request: {key} = {request.value}")
+        # basic write to local store (last-writer-wins)
+        await store.set(key, request.value)
 
     # replicate to followers
-    success, ack_count, failed = await replicator.replicate(key, request.value)
+    success, ack_count, failed = await replicator.replicate(
+        key, request.value, version=version
+    )
 
     if not success:
         # rollback local write if quorum not met
@@ -139,14 +178,19 @@ async def write_key(key: str, request: WriteRequest) -> WriteResponse:
         key=key,
         quorum_acks=ack_count,
         message=f"write successful with {ack_count} acknowledgments",
+        version=version,
     )
 
 
 @app.post("/internal/replicate", status_code=status.HTTP_200_OK)
-async def receive_replication(request: ReplicateRequest) -> dict[str, str]:
+async def receive_replication(request: ReplicateRequest) -> dict[str, Any]:
     """
     internal endpoint for receiving replications from leader.
     used by followers to apply writes from the leader.
+
+    supports both basic and versioned modes:
+    - basic: always applies write (last-writer-wins)
+    - versioned: only applies if version > current version
     """
     settings = get_settings()
 
@@ -156,11 +200,28 @@ async def receive_replication(request: ReplicateRequest) -> dict[str, str]:
             detail="leader should not receive replication requests",
         )
 
-    logger.info(f"received replication: {request.key} = {request.value}")
-
-    await store.set(request.key, request.value)
-
-    return {"status": "ok", "key": request.key}
+    if request.version is not None:
+        # versioned mode - only accept if version > current
+        logger.info(
+            f"received versioned replication: {request.key} = {request.value} (v{request.version})"
+        )
+        accepted = await store.set_versioned(
+            request.key, request.value, request.version
+        )
+        if accepted:
+            return {"status": "ok", "key": request.key, "accepted": True}
+        else:
+            return {
+                "status": "ok",
+                "key": request.key,
+                "accepted": False,
+                "reason": "stale",
+            }
+    else:
+        # basic mode - always apply (last-writer-wins)
+        logger.info(f"received replication: {request.key} = {request.value}")
+        await store.set(request.key, request.value)
+        return {"status": "ok", "key": request.key}
 
 
 @app.get("/store/{key}", response_model=ReadResponse)
@@ -222,6 +283,7 @@ async def delete_key(key: str) -> dict[str, Any]:
 def main() -> None:
     """run the application with uvicorn."""
     import uvicorn
+
     settings = get_settings()
     uvicorn.run(
         "app.main:app",
